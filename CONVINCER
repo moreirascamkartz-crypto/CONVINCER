@@ -1,0 +1,2355 @@
+--[[
+    CONVINCER | v21 — E KEY SPAM + SETTINGS + PILL BUTTONS
+]]
+
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local SoundService = game:GetService("SoundService")
+local StarterGui = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local VIM = game:GetService("VirtualInputManager")
+local Terrain = workspace:FindFirstChildOfClass("Terrain")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+repeat task.wait() until LocalPlayer.Character
+
+for _, gui in ipairs(PlayerGui:GetChildren()) do
+    if gui:IsA("ScreenGui") and (gui.Name:lower():find("aura") or gui.Name:lower():find("dragon") or gui.Name:lower():find("finder") or gui.Name:lower():find("convincer") or gui.Name:lower():find("neptune") or gui.Name:lower():find("traced")) then
+        gui:Destroy()
+    end
+end
+
+COLOR_WHITE = Color3.fromRGB(255, 255, 255)
+
+ALERT_SOUND_ID = "rbxassetid://91271439961236"
+CONFIG_PATH = "Convincer_Config.json"
+UI_CLICK_SOUND_ID = "rbxassetid://88442833509532"
+UI_SOUND_VOLUME = 0.35
+FRIEND_JOIN_SOUND_ID = "rbxassetid://87296803139875"
+FRIEND_JOIN_VOLUME = 0.85
+
+function PlayFriendJoinSound()
+    local s = Instance.new("Sound")
+    s.SoundId = FRIEND_JOIN_SOUND_ID; s.Volume = FRIEND_JOIN_VOLUME
+    s.Parent = SoundService; s:Play()
+    task.delay(12, function() if s and s.Parent then s:Destroy() end end)
+end
+function IsLocalFriend(p)
+    if not p or p == LocalPlayer then return false end
+    local ok, r = pcall(function() return LocalPlayer:IsFriendsWith(p.UserId) end)
+    return ok and r == true
+end
+Players.PlayerAdded:Connect(function(p) task.spawn(function() if IsLocalFriend(p) then PlayFriendJoinSound() end end) end)
+
+-- ============================================================ --
+-- TRACED TRADE ENGINE
+-- ============================================================ --
+getupvalue_  = debug and debug.getupvalue or getupvalue
+getupvalues_ = debug and debug.getupvalues or getupvalues
+
+REMOTES = { trade = nil, duel = nil, mapped = false }
+FB_T = "be01db97-504e-48f7-b7da-ff1f3969e089"
+tokenLive = false
+
+do
+    local function isUUID(s) return type(s) == "string" and #s == 36 and s:match("^%x+%-%x+%-%x+%-%x+%-%x+$") ~= nil end
+    local function protoHasToken(fn)
+        local ok, consts = pcall(debug.getconstants, fn)
+        if not ok or type(consts) ~= "table" then return nil end
+        local token, wantsInvoke = nil, false
+        for _, v in pairs(consts) do
+            if isUUID(v) then token = v
+            elseif v == "InvokeServer" then wantsInvoke = true end
+        end
+        if token and wantsInvoke then return token end
+    end
+    local function walkProto(fn, maxD)
+        local found
+        local function rec(f, d)
+            if found or d > maxD then return end
+            local t = protoHasToken(f)
+            if t then found = t return end
+            local ok, protos = pcall(debug.getprotos, f)
+            if ok and type(protos) == "table" then for _, p in pairs(protos) do rec(p, d+1) end end
+        end
+        rec(fn, 0)
+        return found
+    end
+    pcall(function()
+        local TC = require(ReplicatedStorage.Controllers.TradeController)
+        if type(TC) == "table" then
+            local t = walkProto(rawget(TC, "SendInvite"), 5)
+            if t then FB_T = t tokenLive = true end
+        end
+    end)
+end
+
+function findRF(fn)
+    if type(getupvalue_) ~= "function" then return nil end
+    local ok, v = pcall(getupvalue_, fn, 3)
+    if ok and typeof(v) == "Instance" and v:IsA("RemoteFunction") then return v end
+    local ok2, ups = pcall(getupvalues_, fn)
+    if ok2 and type(ups) == "table" then
+        for _, vv in pairs(ups) do if typeof(vv) == "Instance" and vv:IsA("RemoteFunction") then return vv end end
+    end
+    return nil
+end
+
+function resolveRemotes()
+    if REMOTES.mapped and REMOTES.trade then return REMOTES end
+    pcall(function()
+        local TC = require(ReplicatedStorage.Controllers.TradeController)
+        if type(TC) == "table" and type(TC.SendInvite) == "function" then
+            REMOTES.trade = findRF(TC.SendInvite) or REMOTES.trade
+        end
+    end)
+    pcall(function()
+        local DC = require(ReplicatedStorage.Controllers.DuelsMachineController)
+        if type(DC) == "table" and type(DC.SendInvite) == "function" then
+            REMOTES.duel = findRF(DC.SendInvite) or REMOTES.duel
+        end
+    end)
+    if REMOTES.trade then REMOTES.mapped = true end
+    return REMOTES
+end
+task.defer(resolveRemotes)
+task.spawn(function()
+    task.wait()
+    for _ = 1, 20 do
+        if REMOTES.trade and REMOTES.duel then return end
+        task.wait(1); REMOTES.mapped = false; resolveRemotes()
+    end
+end)
+
+function invokeRF(rf, timeout, ...)
+    local args = table.pack(...)
+    local done = false
+    local ok, r1, r2, r3
+    task.spawn(function()
+        ok, r1, r2, r3 = pcall(function() return rf:InvokeServer(table.unpack(args, 1, args.n)) end)
+        done = true
+    end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < (timeout or 8) do task.wait() end
+    if not done then return false, "timeout" end
+    return ok, r1, r2, r3
+end
+function shortReason(s)
+    if type(s) ~= "string" or s == "" then return "NO REASON" end
+    s = s:gsub("^%s+",""):gsub("%s+$","")
+    if #s > 14 then s = s:sub(1,13) .. "…" end
+    return s:upper()
+end
+function classifyReason(s)
+    if type(s) ~= "string" then return nil end
+    local l = s:lower()
+    if l:find("wait") or l:find("cooldown") then return "COOLDOWN" end
+    if l:find("pending") then return "PENDING" end
+    if l:find("offline") or l:find("left") then return "OFFLINE" end
+    if l:find("trade") and l:find("in") then return "IN TRADE" end
+    if l:find("already") then return "ALREADY" end
+    if l:find("busy") then return "BUSY" end
+    return nil
+end
+
+Actions = {}
+function Actions.sendTrade(uid)
+    local rm = resolveRemotes()
+    if not rm.trade then
+        local t = 0
+        while not rm.trade and t < 6 do
+            task.wait(0.25); t += 0.25; REMOTES.mapped = false; rm = resolveRemotes()
+        end
+    end
+    if not rm.trade then return false, "NO REMOTE" end
+    local ok, srv, reason = invokeRF(rm.trade, 8, FB_T, uid)
+    if not ok then return false, "ERROR" end
+    if srv ~= true then return false, classifyReason(reason) or shortReason(reason) end
+    return true, "SENT"
+end
+function Actions.addFriend(uid)
+    local p = Players:GetPlayerByUserId(uid)
+    if not p then return false, "NOT HERE" end
+    local ok, friends = pcall(function() return LocalPlayer:IsFriendsWith(uid) end)
+    if ok and friends then return false, "FRIENDS" end
+    if pcall(function() p:RequestFriendship() end) then return true, "SENT" end
+    return false, "BLOCKED"
+end
+
+-- ============================================================ --
+-- PRIORITY
+-- ============================================================ --
+PRIORITY = {}
+PRIORITY_SAVE_PATHS = {"Convincer_priority.json","Convincer/priority.json","config/Convincer_priority.json"}
+PRIORITY_SAVE_PATH = nil
+Catalog, CatalogList = {}, {}
+
+function _env(n)
+    local ok, f = pcall(function() return (getgenv and getgenv()[n]) or nil end)
+    if ok and type(f) == "function" then return f end
+    local ok2, f2 = pcall(function() return getfenv()[n] end)
+    if ok2 and type(f2) == "function" then return f2 end
+    return nil
+end
+function addCatalogName(n)
+    if type(n) ~= "string" then return false end
+    n = n:gsub("^%s+", ""):gsub("%s+$", "")
+    if n == "" or #n > 60 then return false end
+    local low = n:lower()
+    if Catalog[low] then return false end
+    Catalog[low] = n
+    CatalogList[#CatalogList + 1] = n
+    return true
+end
+function safeReq(inst)
+    if not inst or not inst:IsA("ModuleScript") then return nil end
+    if setthreadidentity then pcall(setthreadidentity, 8) end
+    local ok, res = pcall(require, inst)
+    return ok and res or nil
+end
+function harvestModule(AD)
+    if type(AD) ~= "table" then return 0 end
+    local added = 0
+    for index, info in pairs(AD) do
+        local disp = nil
+        if type(info) == "table" then
+            if info.Egg ~= true and info.LuckyBlock ~= true then
+                disp = (type(info.DisplayName) == "string" and info.DisplayName ~= "") and info.DisplayName or (type(index) == "string" and index or nil)
+            end
+        elseif type(index) == "string" then disp = index end
+        if disp and addCatalogName(disp) then added = added + 1 end
+        if type(index) == "string" and disp then Catalog[index:lower()] = disp end
+    end
+    return added
+end
+function buildCatalog()
+    local added = 0
+    local datas = ReplicatedStorage:FindFirstChild("Datas")
+    local mod = datas and datas:FindFirstChild("Animals")
+    if mod then added = added + harvestModule(safeReq(mod)) end
+    if added == 0 then
+        local deep = ReplicatedStorage:FindFirstChild("Animals", true)
+        if deep and deep:IsA("ModuleScript") then added = added + harvestModule(safeReq(deep)) end
+    end
+    if added == 0 then
+        for _, folderName in ipairs({"Animals","Brainrots","Pets","Characters"}) do
+            local f = ReplicatedStorage:FindFirstChild(folderName, true)
+            if f and not f:IsA("ModuleScript") then
+                for _, ch in ipairs(f:GetChildren()) do
+                    if ch:IsA("Model") or ch:IsA("Folder") then if addCatalogName(ch.Name) then added = added + 1 end end
+                end
+                if added > 0 then break end
+            end
+        end
+    end
+    if added > 0 then table.sort(CatalogList) end
+    return added > 0
+end
+task.spawn(function()
+    local tries = 0
+    while tries < 40 do
+        if #CatalogList > 0 then break end
+        pcall(buildCatalog); tries = tries + 1; task.wait(0.5)
+    end
+    while true do
+        if #CatalogList == 0 then pcall(buildCatalog) end
+        task.wait(10)
+    end
+end)
+pcall(buildCatalog)
+
+function _ensureFolder()
+    local mf, isf = _env("makefolder"), _env("isfolder")
+    if type(mf) ~= "function" then return end
+    if type(isf) == "function" then local ok, e = pcall(isf, "Convincer"); if ok and e then return end end
+    pcall(mf, "Convincer")
+end
+function _tryWrite(path, enc)
+    local wf, rf = _env("writefile"), _env("readfile")
+    if type(wf) ~= "function" then return false end
+    if not pcall(wf, path, enc) then return false end
+    if type(rf) == "function" then
+        local ok, back = pcall(rf, path)
+        if not ok or back ~= enc then return false end
+    end
+    return true
+end
+function SavePriority()
+    local wf = _env("writefile")
+    if type(wf) ~= "function" then return false end
+    local ok, enc = pcall(function() return HttpService:JSONEncode({list = PRIORITY}) end)
+    if not ok then return false end
+    _ensureFolder()
+    local order = {}
+    if PRIORITY_SAVE_PATH then order[#order+1] = PRIORITY_SAVE_PATH end
+    for _, p in ipairs(PRIORITY_SAVE_PATHS) do if p ~= PRIORITY_SAVE_PATH then order[#order+1] = p end end
+    for _, p in ipairs(order) do
+        if p:find("/") then _ensureFolder() end
+        if _tryWrite(p, enc) then PRIORITY_SAVE_PATH = p return true end
+    end
+    return false
+end
+function LoadPriority()
+    local rf, isf = _env("readfile"), _env("isfile")
+    if type(rf) ~= "function" then return false end
+    for _, p in ipairs(PRIORITY_SAVE_PATHS) do
+        local exists = true
+        if type(isf) == "function" then local okc, e = pcall(isf, p); exists = okc and e end
+        if exists then
+            local ok, raw = pcall(rf, p)
+            if ok and type(raw) == "string" and raw ~= "" then
+                local ok2, dec = pcall(function() return HttpService:JSONDecode(raw) end)
+                if ok2 and type(dec) == "table" then
+                    local list = dec.list or dec
+                    for _, v in ipairs(list) do if type(v) == "string" and v ~= "" then PRIORITY[#PRIORITY+1] = v:lower() end end
+                    PRIORITY_SAVE_PATH = p
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+pcall(LoadPriority)
+function PriorityHit(name)
+    if type(name) ~= "string" then return false end
+    local low = name:lower()
+    for _, p in ipairs(PRIORITY) do if low:find(p, 1, true) then return true end end
+    return false
+end
+
+-- ============================================================ --
+-- ESTADO
+-- ============================================================ --
+scannerEnabled = true
+fpsOptimizerEnabled = false
+fpsOptimizerApplied = false
+scannerConnection = nil
+detectedObjects = {}
+dragonOwners = {}
+dragonItems = {}
+playerBases = {}
+soundsEnabled = true
+ESPPlayerEnabled = true
+AutoSendEnabled = false
+AutoSendRunning = false
+AutoSendHandledPartner = nil
+AutoSendAbortFlag = false
+AutoSendLang = "en"
+Presets = {}
+
+PLAZA_PLACE_IDS = { Normal = 78906538690694, Pro = 119594317142884, OG = 128855408206367 }
+PlazaTier = "Normal"
+PlazaTeleportBusy = false
+
+currentPartner = nil
+currentPartnerId = nil
+tradeClosedAt = nil
+seenTradeNotifs = {}
+
+-- ============================================================ --
+-- SAVE/LOAD
+-- ============================================================ --
+function SaveConfig()
+    local cfg = {
+        WindowPosition = {X = Win and Win.Position.X.Offset or 0, Y = Win and Win.Position.Y.Offset or 0},
+        SoundsEnabled = soundsEnabled, ESPPlayerEnabled = ESPPlayerEnabled,
+        AutoSendEnabled = AutoSendEnabled, AutoSendLang = AutoSendLang,
+        FPSOptimizerEnabled = fpsOptimizerEnabled,
+        Presets = Presets, PlazaTier = PlazaTier,
+    }
+    pcall(function() if writefile then writefile(CONFIG_PATH, HttpService:JSONEncode(cfg)) end end)
+end
+function LoadConfig()
+    pcall(function()
+        if isfile and isfile(CONFIG_PATH) then
+            local data = HttpService:JSONDecode(readfile(CONFIG_PATH))
+            if data then
+                if data.SoundsEnabled ~= nil then soundsEnabled = data.SoundsEnabled end
+                if data.ESPPlayerEnabled ~= nil then ESPPlayerEnabled = data.ESPPlayerEnabled end
+                if data.AutoSendEnabled ~= nil then AutoSendEnabled = data.AutoSendEnabled end
+                if data.AutoSendLang and (data.AutoSendLang == "pt" or data.AutoSendLang == "es" or data.AutoSendLang == "en") then AutoSendLang = data.AutoSendLang end
+                if data.FPSOptimizerEnabled ~= nil then fpsOptimizerEnabled = data.FPSOptimizerEnabled end
+                if type(data.Presets) == "table" then
+                    Presets = {}
+                    for _, e in ipairs(data.Presets) do
+                        if type(e) == "table" and type(e.text) == "string" and e.text ~= "" then table.insert(Presets, {text = e.text}) end
+                    end
+                end
+                if type(data.PlazaTier) == "string" and PLAZA_PLACE_IDS[data.PlazaTier] then PlazaTier = data.PlazaTier end
+                if data.WindowPosition and Win then Win.Position = UDim2.new(0.5, data.WindowPosition.X, 0.5, data.WindowPosition.Y) end
+            end
+        end
+    end)
+end
+
+-- ============================================================ --
+-- HELPERS
+-- ============================================================ --
+function IsBlacklisted(name)
+    if not name then return false end
+    local n = tostring(name):lower()
+    for _, b in ipairs({"gattino","hydrantino","lightningdragonrig","tortuguini","tortugunii","dragonfrutini","arco-iris","ballon","rainbowballon","Trait-balloon","_trait"}) do
+        if n:find(b,1,true) then return true end
+    end
+    return false
+end
+function AddCorner(o, r) local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, r or 8) c.Parent = o return c end
+function AddStroke(o, c, t)
+    local s = Instance.new("UIStroke")
+    s.Color = c or COLOR_WHITE; s.Thickness = t or 1
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = o
+    return s
+end
+function PlayAlertSound()
+    if not soundsEnabled then return end
+    local s = Instance.new("Sound")
+    s.SoundId = ALERT_SOUND_ID; s.Volume = 1.5; s.RollOffMaxDistance = 10000
+    s.Parent = SoundService; pcall(function() s:Play() end)
+    task.delay(3, function() if s and s.Parent then pcall(s.Destroy, s) end end)
+end
+function PlayUIClickSound()
+    local s = Instance.new("Sound")
+    s.SoundId = UI_CLICK_SOUND_ID; s.Volume = UI_SOUND_VOLUME
+    s.Parent = SoundService; pcall(function() s:Play() end)
+    task.delay(2, function() if s and s.Parent then s:Destroy() end end)
+end
+
+-- ============================================================ --
+-- E KEY SPAM
+-- ============================================================ --
+function SpamEKey(duration)
+    task.spawn(function()
+        local t0 = tick()
+        while tick() - t0 < duration do
+            pcall(function()
+                VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+            end)
+            task.wait(0.015)
+            pcall(function()
+                VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            end)
+            task.wait(0.015)
+        end
+        pcall(function()
+            if keypress and keyrelease then
+                keyrelease(0x45)
+            end
+        end)
+    end)
+end
+
+-- ============================================================ --
+-- FPS OPTIMIZER
+-- ============================================================ --
+savedLighting = nil
+function ApplyFPSOptimizer()
+    if fpsOptimizerApplied then return end
+    fpsOptimizerApplied = true
+    pcall(function()
+        savedLighting = {GlobalShadows = Lighting.GlobalShadows, EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale, EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale, FogEnd = Lighting.FogEnd, Brightness = Lighting.Brightness}
+        Lighting.GlobalShadows = false; Lighting.EnvironmentDiffuseScale = 0
+        Lighting.EnvironmentSpecularScale = 0; Lighting.FogEnd = 500; Lighting.Brightness = 2
+    end)
+    pcall(function()
+        for _, e in ipairs(Lighting:GetChildren()) do
+            if e:IsA("PostEffect") then e.Enabled = false end
+            if e:IsA("Atmosphere") then e.Density = 0 e.Haze = 0 e.Glare = 0 end
+            if e:IsA("Sky") then e.SunAngularSize = 0 end
+        end
+    end)
+    pcall(function()
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam") or d:IsA("Smoke") or d:IsA("Fire") or d:IsA("Sparkles") then
+                d.Enabled = false
+            elseif d:IsA("Light") then d.Enabled = false
+            elseif d:IsA("BasePart") then
+                d.CastShadow = false
+                if d.Material == Enum.Material.Grass or d.Material == Enum.Material.LeafyGrass or d.Material == Enum.Material.Sand then
+                    d.Material = Enum.Material.SmoothPlastic
+                end
+            elseif d:IsA("Decal") and d.Transparency == 0 then d.Transparency = 1
+            elseif d:IsA("Texture") then d.Transparency = 1 end
+        end
+    end)
+    pcall(function()
+        if Terrain then
+            Terrain.WaterWaveSize = 0; Terrain.WaterWaveSpeed = 0
+            Terrain.WaterReflectance = 0; Terrain.WaterTransparency = 1; Terrain.Decoration = false
+        end
+    end)
+    pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+    scannerConnection = workspace.DescendantAdded:Connect(function(d)
+        if not fpsOptimizerEnabled then return end
+        pcall(function()
+            if d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam") or d:IsA("Smoke") or d:IsA("Fire") or d:IsA("Sparkles") then d.Enabled = false
+            elseif d:IsA("Light") then d.Enabled = false
+            elseif d:IsA("BasePart") then d.CastShadow = false end
+        end)
+    end)
+end
+function RemoveFPSOptimizer()
+    if not fpsOptimizerApplied then return end
+    fpsOptimizerApplied = false
+    if savedLighting then
+        pcall(function()
+            Lighting.GlobalShadows = savedLighting.GlobalShadows
+            Lighting.EnvironmentDiffuseScale = savedLighting.EnvironmentDiffuseScale
+            Lighting.EnvironmentSpecularScale = savedLighting.EnvironmentSpecularScale
+            Lighting.FogEnd = savedLighting.FogEnd
+            Lighting.Brightness = savedLighting.Brightness
+        end)
+    end
+    pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic end)
+end
+
+pcall(function()
+    LocalPlayer.CameraMaxZoomDistance = 1000
+    LocalPlayer.CameraMinZoomDistance = 0.5
+    LocalPlayer.DevCameraOcclusionMode = Enum.DevCameraOcclusionMode.Invisicam
+end)
+function StartAntiCameraCollision()
+    local lastC, lastF
+    RunService.Heartbeat:Connect(function()
+        local cam = workspace.CurrentCamera
+        local ch = LocalPlayer.Character
+        if not cam or not ch then return end
+        local hrp = ch:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local cp, fp = cam.CFrame.Position, hrp.Position
+        if lastC and lastF and (cp-lastC).Magnitude < 0.4 and (fp-lastF).Magnitude < 0.4 then return end
+        lastC, lastF = cp, fp
+        pcall(function()
+            local parts = cam:GetPartsObscuringTarget({fp}, {ch})
+            for _, p in ipairs(parts) do
+                if p:IsA("BasePart") and p.Transparency < 1 and not p:IsDescendantOf(ch) and not p:FindFirstAncestorOfClass("Tool") then
+                    p.LocalTransparencyModifier = 0.75
+                end
+            end
+        end)
+    end)
+end
+StartAntiCameraCollision()
+
+function SendFriendRequest(player)
+    if not player or player == LocalPlayer then return false end
+    task.spawn(function()
+        pcall(function() StarterGui:SetCore("PromptSendFriendRequest", player) end)
+        pcall(function() LocalPlayer:RequestFriendship(player) end)
+    end)
+    return true
+end
+
+-- ============================================================ --
+-- PLOT / TP BASE (STRICT + E SPAM)
+-- ============================================================ --
+function PlayerMatchesText(player, text)
+    if not player or not text then return false end
+    local v = tostring(text):lower()
+    return v:find(player.Name:lower(),1,true) ~= nil or v:find(player.DisplayName:lower(),1,true) ~= nil
+end
+function GetPlotOwnerPlayer(plot)
+    if not plot then return nil end
+    for _, a in ipairs({"Owner","OwnerName","Player","PlayerName","Username","AssignedPlayer","AssignedPlayerName"}) do
+        local v = plot:GetAttribute(a)
+        if v ~= nil then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if typeof(v) == "Instance" and v == p then return p end
+                if PlayerMatchesText(p, v) then return p end
+            end
+        end
+    end
+    for _, a in ipairs({"UserId","OwnerUserId","PlayerUserId","OwnerId"}) do
+        local v = tonumber(plot:GetAttribute(a))
+        if v then for _, p in ipairs(Players:GetPlayers()) do if p.UserId == v then return p end end end
+    end
+    for _, d in ipairs(plot:GetDescendants()) do
+        if d:IsA("ObjectValue") then for _, p in ipairs(Players:GetPlayers()) do if d.Value == p then return p end end end
+        if d:IsA("StringValue") and d.Value ~= "" then for _, p in ipairs(Players:GetPlayers()) do if PlayerMatchesText(p, d.Value) then return p end end end
+        if (d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox")) and d.Text ~= "" then
+            for _, p in ipairs(Players:GetPlayers()) do if PlayerMatchesText(p, d.Text) then return p end end
+        end
+    end
+    local pn = plot.Name:lower()
+    for _, p in ipairs(Players:GetPlayers()) do if pn == p.Name:lower() or pn == p.DisplayName:lower() then return p end end
+    return nil
+end
+function IsPossibleBase(obj)
+    if not obj then return false end
+    local n = obj.Name:lower()
+    return n:find("plot",1,true) ~= nil or n:find("base",1,true) ~= nil or n:find("tycoon",1,true) ~= nil
+end
+function FindPlayerBase(player)
+    if not player then return nil end
+    local cached = playerBases[player.UserId]
+    if cached and cached:IsDescendantOf(workspace) then
+        local owner = GetPlotOwnerPlayer(cached)
+        if owner == player then return cached else playerBases[player.UserId] = nil end
+    end
+    for _, cname in ipairs({"Plots","Bases","BasePlots","PlotBases","Tycoons","PlazaPlots","Spawns"}) do
+        local container = workspace:FindFirstChild(cname)
+        if container then
+            for _, obj in ipairs(container:GetChildren()) do
+                if (obj:IsA("Model") or obj:IsA("Folder")) and IsPossibleBase(obj) then
+                    local owner = GetPlotOwnerPlayer(obj)
+                    if owner == player then
+                        playerBases[player.UserId] = obj
+                        return obj
+                    end
+                end
+            end
+        end
+    end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("Folder") then
+            if obj:FindFirstChild("PlotSign") then
+                local owner = GetPlotOwnerPlayer(obj)
+                if owner == player then
+                    playerBases[player.UserId] = obj
+                    return obj
+                end
+            end
+        end
+    end
+    local nl = player.Name:lower()
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:IsA("Model") or obj:IsA("Folder") then
+            for _, sub in ipairs(obj:GetChildren()) do
+                if (sub:IsA("Model") or sub:IsA("Folder")) and IsPossibleBase(sub) then
+                    if sub.Name:lower():find(nl, 1, true) or (sub:FindFirstChild("PlotSign") and GetPlotOwnerPlayer(sub) == player) then
+                        playerBases[player.UserId] = sub
+                        return sub
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+function FindBasePart(base)
+    if not base then return nil end
+    if base:IsA("BasePart") then return base end
+    if base:IsA("Model") and base.PrimaryPart then return base.PrimaryPart end
+    for _, w in ipairs({"Base","Main","Spawn","Platform","Floor","Ground","Plot","Center","BasePart","MainPart"}) do
+        local f = base:FindFirstChild(w, true)
+        if f and f:IsA("BasePart") and f.Transparency < 1 then return f end
+    end
+    local best, bS
+    for _, d in ipairs(base:GetDescendants()) do
+        if d:IsA("BasePart") and d.Transparency < 1 and d.Size.Magnitude > 3 then
+            local s = d.Size.Magnitude
+            local n = d.Name:lower()
+            if n:find("base",1,true) then s = s + 1000
+            elseif n:find("floor",1,true) then s = s + 800
+            elseif n:find("ground",1,true) then s = s + 700
+            elseif n:find("platform",1,true) then s = s + 600 end
+            if not best or s > bS then best = d bS = s end
+        end
+    end
+    if not best then for _, d in ipairs(base:GetDescendants()) do if d:IsA("BasePart") then return d end end end
+    return best
+end
+
+function RawTeleportToBase(player)
+    if not player then return false, "no player" end
+    local ch = LocalPlayer.Character
+    if not ch then return false, "no char" end
+    local hrp = ch:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false, "no hrp" end
+    local base = FindPlayerBase(player)
+    if not base then return false, "no base" end
+    local bp = FindBasePart(base)
+    if not bp then return false, "no part" end
+    local ok = pcall(function()
+        ch:PivotTo(bp.CFrame + Vector3.new(0, 8, 0))
+        hrp.AssemblyLinearVelocity = Vector3.new(0,0,0)
+        hrp.AssemblyAngularVelocity = Vector3.new(0,0,0)
+    end)
+    if ok then
+        -- spam E key por 2 segundos apos TP
+        SpamEKey(2)
+        return true, "ok"
+    end
+    return false, "pivot fail"
+end
+
+-- ============================================================ --
+-- ESP / PRIORITY
+-- ============================================================ --
+SKIP_NAMES = { Base=true, PlotSign=true, Spawn=true, Cash=true, Laser=true, Decorations=true, Skin=true, Unlock=true, Purchases=true, FriendPanel=true, AnimalPodiums=true, Conveyor=true, Walls=true, Floor=true }
+ESP_ACCENT = Color3.fromRGB(34, 200, 220)
+ESP_TEXT = Color3.fromRGB(225, 245, 250)
+ESP_MUTED = Color3.fromRGB(140, 165, 180)
+ESP_CARD_BG = Color3.fromRGB(20, 28, 38)
+ESP_SCAN_INTERVAL = 1.5
+espScanBusy, espScanQueued, espDirty = false, false, true
+espConnections = {}
+
+function getPlotOwner(plot)
+    local sign = plot and plot:FindFirstChild("PlotSign")
+    if not sign then return nil end
+    local gui = sign:FindFirstChildWhichIsA("SurfaceGui", true)
+    if not gui then return nil end
+    local lbl = gui:FindFirstChildWhichIsA("TextLabel", true)
+    if not lbl or type(lbl.Text) ~= "string" or lbl.Text == "" then return nil end
+    local t = lbl.Text
+    local low = t:lower()
+    if low:find("empty",1,true) or low:find("your base",1,true) then return nil end
+    return t:match("^(.+)'s Base$") or t
+end
+function detectOG(m)
+    if not m then return false end
+    if m.Name:upper():find(" OG ", 1, true) then return true end
+    local ok, attrs = pcall(m.GetAttributes, m)
+    if ok and type(attrs) == "table" then
+        for k, v in pairs(attrs) do
+            local kk, vv = tostring(k):upper(), tostring(v):upper()
+            if kk == "OG" and (v == true or vv:find("OG",1,true)) then return true end
+            if (kk == "TRAIT" or kk == "TRAITS" or kk == "MUTATION") and vv:find("OG",1,true) then return true end
+        end
+    end
+    return false
+end
+function findPriorityOnPlot(plot)
+    local names, seenNames, isOG = {}, {}, false
+    if not plot then return names, isOG end
+    local function check(m)
+        if not m or not m:IsA("Model") then return end
+        if SKIP_NAMES[m.Name] then return end
+        if Players:GetPlayerFromCharacter(m) then return end
+        if PriorityHit(m.Name) then
+            local low = m.Name:lower()
+            if not seenNames[low] then seenNames[low] = true names[#names+1] = m.Name end
+        end
+        if detectOG(m) then isOG = true end
+    end
+    local pods = plot:FindFirstChild("AnimalPodiums")
+    if pods then for _, m in ipairs(pods:GetDescendants()) do check(m) end end
+    for _, m in ipairs(plot:GetChildren()) do if m ~= pods then check(m) end end
+    return names, isOG
+end
+
+BaseMarks = {}
+function basePart(plot)
+    local b = plot and plot:FindFirstChild("Base")
+    if b then
+        if b:IsA("BasePart") then return b end
+        local p2 = b:FindFirstChildWhichIsA("BasePart", true)
+        if p2 then return p2 end
+    end
+    return plot and plot:FindFirstChildWhichIsA("BasePart", true) or nil
+end
+function clearBaseMark(plot)
+    local d = BaseMarks[plot]
+    if not d then return end
+    if d.bb then pcall(function() d.bb:Destroy() end) end
+    BaseMarks[plot] = nil
+end
+function markBase(plot, owner, hits, isOG)
+    if not plot or not owner then return end
+    local part = basePart(plot)
+    if not part then return end
+    local d = BaseMarks[plot]
+    if not d then
+        local bb = Instance.new("BillboardGui")
+        bb.Name = "ConvincerBaseTag"; bb.Adornee = part
+        bb.Size = UDim2.fromOffset(190, 58); bb.StudsOffset = Vector3.new(0, 10, 0)
+        bb.AlwaysOnTop = true; bb.MaxDistance = 450; bb.LightInfluence = 0; bb.ResetOnSpawn = false
+        bb.Parent = PlayerGui
+        local card = Instance.new("Frame")
+        card.Size = UDim2.fromScale(1,1); card.BackgroundColor3 = ESP_CARD_BG
+        card.BackgroundTransparency = 0.08; card.BorderSizePixel = 0; card.Parent = bb
+        AddCorner(card, 9)
+        local stroke = Instance.new("UIStroke"); stroke.Thickness = 1.6; stroke.Color = ESP_ACCENT; stroke.Parent = card
+        local accent = Instance.new("Frame")
+        accent.Size = UDim2.new(1,-18,0,3); accent.Position = UDim2.fromOffset(9,6)
+        accent.BackgroundColor3 = ESP_ACCENT; accent.BorderSizePixel = 0; accent.Parent = card
+        AddCorner(accent, 2)
+        local oL = Instance.new("TextLabel")
+        oL.Size = UDim2.new(1,-18,0,17); oL.Position = UDim2.fromOffset(9,12)
+        oL.BackgroundTransparency = 1; oL.Font = Enum.Font.GothamBold
+        oL.TextSize = 10; oL.TextColor3 = ESP_TEXT
+        oL.TextXAlignment = Enum.TextXAlignment.Center; oL.TextTruncate = Enum.TextTruncate.AtEnd
+        oL.Parent = card
+        local st = Instance.new("TextLabel")
+        st.Size = UDim2.new(1,-18,0,11); st.Position = UDim2.fromOffset(9,30)
+        st.BackgroundTransparency = 1; st.Font = Enum.Font.GothamBold
+        st.TextSize = 7; st.TextColor3 = ESP_ACCENT
+        st.TextXAlignment = Enum.TextXAlignment.Center; st.Parent = card
+        local it = Instance.new("TextLabel")
+        it.Size = UDim2.new(1,-18,0,12); it.Position = UDim2.fromOffset(9,43)
+        it.BackgroundTransparency = 1; it.Font = Enum.Font.GothamMedium
+        it.TextSize = 6.5; it.TextColor3 = ESP_MUTED
+        it.TextXAlignment = Enum.TextXAlignment.Center
+        it.TextTruncate = Enum.TextTruncate.AtEnd; it.Parent = card
+        d = {bb=bb, ownerLbl=oL, status=st, items=it, stroke=stroke, accent=accent}
+        BaseMarks[plot] = d
+    elseif d.bb.Adornee ~= part then d.bb.Adornee = part end
+    d.ownerLbl.Text = tostring(owner)
+    d.status.Text = isOG and "OG PRIORITY" or "PRIORITY"
+    local shown = {}
+    for i = 1, math.min(#hits, 2) do if hits[i] and hits[i] ~= "" then shown[#shown+1] = tostring(hits[i]) end end
+    if #shown == 0 and isOG then shown[1] = "OG detected" end
+    d.items.Text = table.concat(shown, "  |  ")
+end
+
+PriorityTags = {}
+function setPriorityTag(plr, brainrotName, isOG)
+    if not ESPPlayerEnabled or not plr or plr == LocalPlayer then return end
+    local char = plr.Character
+    local head = char and char:FindFirstChild("Head")
+    if not head then
+        local old = PriorityTags[plr]; if old and old.bb then old.bb:Destroy() end
+        PriorityTags[plr] = nil; return
+    end
+    local d = PriorityTags[plr]
+    if d and (not d.bb.Parent or d.bb.Adornee ~= head) then
+        d.bb:Destroy(); PriorityTags[plr] = nil; d = nil
+    end
+    if not d then
+        local bb = Instance.new("BillboardGui")
+        bb.Name = "ConvincerPriorityTag"; bb.Adornee = head
+        bb.Size = UDim2.fromOffset(190, 30); bb.StudsOffset = Vector3.new(0, 3.2, 0)
+        bb.AlwaysOnTop = true; bb.MaxDistance = 400; bb.LightInfluence = 0; bb.ResetOnSpawn = false
+        bb.Parent = PlayerGui
+        local card = Instance.new("Frame")
+        card.Size = UDim2.fromScale(1,1); card.BackgroundColor3 = ESP_CARD_BG
+        card.BackgroundTransparency = 0.08; card.BorderSizePixel = 0; card.Parent = bb
+        AddCorner(card, 8)
+        local stroke = Instance.new("UIStroke"); stroke.Thickness = 1.5; stroke.Color = ESP_ACCENT; stroke.Parent = card
+        local accent = Instance.new("Frame")
+        accent.Size = UDim2.new(0,4,1,-8); accent.Position = UDim2.fromOffset(4,4)
+        accent.BackgroundColor3 = ESP_ACCENT; accent.BorderSizePixel = 0; accent.Parent = card
+        AddCorner(accent, 2)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1,-18,1,0); lbl.Position = UDim2.fromOffset(10,0)
+        lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.GothamBold
+        lbl.TextSize = 9; lbl.TextColor3 = ESP_TEXT
+        lbl.TextXAlignment = Enum.TextXAlignment.Center
+        lbl.TextTruncate = Enum.TextTruncate.AtEnd; lbl.Parent = card
+        PriorityTags[plr] = {bb=bb, lbl=lbl, stroke=stroke, accent=accent, name=nil}
+        d = PriorityTags[plr]
+    end
+    local key = tostring(brainrotName) .. "|" .. tostring(isOG)
+    if d.name ~= key then d.name = key d.lbl.Text = tostring(brainrotName) end
+end
+function clearPriorityTag(plr)
+    local d = PriorityTags[plr]; if d and d.bb then d.bb:Destroy() end; PriorityTags[plr] = nil
+end
+function clearAllPriorityTags() for p in pairs(PriorityTags) do clearPriorityTag(p) end end
+
+function ScanPrioritiesNow()
+    if not scannerEnabled then return end
+    if espScanBusy then espDirty = true return end
+    espScanBusy = true; espDirty = false
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local flagged = {}
+            local plots = workspace:FindFirstChild("Plots")
+            local live = {}
+            if plots then
+                for _, plot in ipairs(plots:GetChildren()) do
+                    live[plot] = true
+                    local owner = getPlotOwner(plot)
+                    if owner then
+                        local hits, isOG = findPriorityOnPlot(plot)
+                        if #hits > 0 or isOG then
+                            flagged[owner:lower()] = {brainrot=hits[1] or "OG", hits=hits, isOG=isOG, plot=plot}
+                            markBase(plot, owner, hits, isOG)
+                        else clearBaseMark(plot) end
+                    else clearBaseMark(plot) end
+                end
+            end
+            for plot in pairs(BaseMarks) do if not live[plot] or not plot.Parent then clearBaseMark(plot) end end
+            local so, si = {}, {}
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= LocalPlayer then
+                    local info = flagged[plr.Name:lower()] or flagged[plr.DisplayName:lower()]
+                    if info and #info.hits > 0 then
+                        so[plr.UserId] = plr; si[plr.UserId] = {}
+                        for _, h in ipairs(info.hits) do si[plr.UserId][#si[plr.UserId]+1] = {Object=nil, Name=h} end
+                    end
+                    local char = plr.Character
+                    local tool = char and char:FindFirstChildOfClass("Tool")
+                    if tool and PriorityHit(tool.Name) then
+                        so[plr.UserId] = plr; si[plr.UserId] = si[plr.UserId] or {}
+                        local exists = false
+                        for _, it in ipairs(si[plr.UserId]) do if tostring(it.Name):lower() == tostring(tool.Name):lower() then exists = true break end end
+                        if not exists then si[plr.UserId][#si[plr.UserId]+1] = {Object=nil, Name=tool.Name} end
+                    end
+                end
+            end
+            dragonOwners = so; dragonItems = si
+            if ESPPlayerEnabled then
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if plr ~= LocalPlayer then
+                        local info = flagged[plr.Name:lower()] or flagged[plr.DisplayName:lower()]
+                        if not info then
+                            local char = plr.Character
+                            local tool = char and char:FindFirstChildOfClass("Tool")
+                            if tool and PriorityHit(tool.Name) then info = {brainrot=tool.Name, isOG=false} end
+                        end
+                        if info then setPriorityTag(plr, info.brainrot, info.isOG) else clearPriorityTag(plr) end
+                    end
+                end
+            else clearAllPriorityTags() end
+            for plr in pairs(PriorityTags) do if not plr.Parent then clearPriorityTag(plr) end end
+            if UpdateDragonList then QueueDragonListUpdate() end
+        end)
+        espScanBusy = false
+        if not ok then espDirty = true warn("[CONVINCER] " .. tostring(err)) end
+    end)
+end
+function ForceRescanPriorities()
+    if not scannerEnabled then return end
+    espDirty = true
+    if espScanBusy then task.delay(0.08, function() if scannerEnabled and espDirty and not espScanBusy then ScanPrioritiesNow() end end)
+    else ScanPrioritiesNow() end
+end
+function markESPDirty()
+    if not scannerEnabled then return end
+    espDirty = true
+    if espScanQueued then return end
+    espScanQueued = true
+    task.delay(0.15, function()
+        espScanQueued = false
+        if scannerEnabled and espDirty and not espScanBusy then ScanPrioritiesNow() end
+    end)
+end
+function connectPlotESP(plot)
+    if not plot or espConnections[plot] then return end
+    local cons = {}
+    espConnections[plot] = cons
+    local function add(c) cons[#cons+1] = c end
+    add(plot.DescendantAdded:Connect(markESPDirty))
+    add(plot.DescendantRemoving:Connect(markESPDirty))
+    local sign = plot:FindFirstChild("PlotSign")
+    local gui = sign and sign:FindFirstChildWhichIsA("SurfaceGui", true)
+    local lbl = gui and gui:FindFirstChildWhichIsA("TextLabel", true)
+    if lbl then add(lbl:GetPropertyChangedSignal("Text"):Connect(markESPDirty)) end
+end
+function disconnectPlotESP(plot)
+    local cons = espConnections[plot]; if not cons then return end
+    for _, c in ipairs(cons) do pcall(function() c:Disconnect() end) end
+    espConnections[plot] = nil
+end
+function setupESPPlotWatcher()
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return end
+    for _, plot in ipairs(plots:GetChildren()) do connectPlotESP(plot) end
+    if not espConnections.__plots then
+        espConnections.__plots = {
+            plots.ChildAdded:Connect(function(p) connectPlotESP(p) markESPDirty() end),
+            plots.ChildRemoved:Connect(function(p) disconnectPlotESP(p) clearBaseMark(p) markESPDirty() end),
+        }
+    end
+end
+task.spawn(function()
+    while PlayerGui and PlayerGui.Parent do
+        setupESPPlotWatcher()
+        if scannerEnabled then
+            if not espScanBusy then ScanPrioritiesNow() end
+        else
+            clearAllPriorityTags()
+            for plot in pairs(BaseMarks) do clearBaseMark(plot) end
+        end
+        task.wait(ESP_SCAN_INTERVAL)
+    end
+end)
+Players.PlayerRemoving:Connect(function(plr) clearPriorityTag(plr) markESPDirty() end)
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function() if scannerEnabled then markESPDirty() end end)
+    markESPDirty()
+end)
+
+function FindObjectPlot(obj)
+    local p = obj.Parent
+    while p and p ~= workspace do
+        local pn = p.Name:lower()
+        if p:FindFirstChild("PlotSign") or p:FindFirstChild("Sign") or pn:find("plot",1,true) or pn:find("base",1,true) or pn:find("tycoon",1,true) then return p end
+        p = p.Parent
+    end
+    return nil
+end
+function ProcessObject(obj)
+    if not scannerEnabled or not obj or not obj.Parent or not obj:IsA("Model") then return end
+    if detectedObjects[obj] then return end
+    for _, p in ipairs(Players:GetPlayers()) do if p.Character and obj:IsDescendantOf(p.Character) then return end end
+    local raw = obj.Name
+    if not raw or IsBlacklisted(raw) then return end
+    if not PriorityHit(raw) then return end
+    local tp = FindObjectPlot(obj)
+    if not tp then return end
+    local owner = GetPlotOwnerPlayer(tp)
+    if not owner or owner == LocalPlayer then return end
+    detectedObjects[obj] = true
+    playerBases[owner.UserId] = tp
+    dragonOwners[owner.UserId] = owner
+    dragonItems[owner.UserId] = dragonItems[owner.UserId] or {}
+    local exists = false
+    for _, it in ipairs(dragonItems[owner.UserId]) do if it.Object == obj or it.Name:lower() == raw:lower() then exists = true break end end
+    if not exists then
+        table.insert(dragonItems[owner.UserId], {Object=obj, Name=raw})
+        PlayAlertSound()
+    end
+    if UpdateDragonList then QueueDragonListUpdate() end
+end
+SCAN_BATCH_SIZE = 150
+scanBusy = false
+function ScanAll()
+    if not scannerEnabled or scanBusy then return end
+    scanBusy = true
+    task.spawn(function()
+        local objs = workspace:GetDescendants()
+        local total, idx = #objs, 1
+        while idx <= total do
+            if not scannerEnabled then break end
+            local processed = 0
+            while processed < SCAN_BATCH_SIZE and idx <= total do
+                local obj = objs[idx]; idx = idx + 1; processed = processed + 1
+                pcall(ProcessObject, obj)
+            end
+            task.wait(0.05)
+        end
+        scanBusy = false
+        QueueDragonListUpdate()
+    end)
+end
+function ClearESP()
+    detectedObjects = {}; dragonOwners = {}; dragonItems = {}
+    clearAllPriorityTags()
+    for plot in pairs(BaseMarks) do clearBaseMark(plot) end
+end
+listUpdateQueued = false
+function QueueDragonListUpdate()
+    if listUpdateQueued then return end
+    listUpdateQueued = true
+    task.delay(0.1, function()
+        listUpdateQueued = false
+        if UpdateDragonList then pcall(UpdateDragonList) end
+    end)
+end
+
+-- ============================================================ --
+-- CHAMS
+-- ============================================================ --
+DRAWING_OK = false
+pcall(function() DRAWING_OK = (typeof(Drawing) == "table") and (Drawing.new ~= nil) end)
+TrackedESP = {}
+function createTrackingDrawings()
+    if not DRAWING_OK then return nil end
+    local ok, set = pcall(function()
+        local line = Drawing.new("Line")
+        line.Thickness = 1.8; line.Color = ESP_ACCENT; line.Transparency = 1; line.Visible = false
+        local arrow = Drawing.new("Triangle")
+        arrow.Thickness = 1; arrow.Color = ESP_ACCENT; arrow.Filled = true; arrow.Transparency = 1; arrow.Visible = false
+        local nameText = Drawing.new("Text")
+        nameText.Size = 14; nameText.Center = true; nameText.Outline = true
+        nameText.Color = Color3.fromRGB(220, 245, 250)
+        nameText.OutlineColor = Color3.fromRGB(20, 40, 50)
+        nameText.Transparency = 1; nameText.Visible = false
+        return {line=line, arrow=arrow, nameText=nameText}
+    end)
+    return ok and set or nil
+end
+function removeTrackedESP(uid)
+    local d = TrackedESP[uid]
+    if not d then return end
+    if d.hl then pcall(function() d.hl:Destroy() end) end
+    if d.charConn then pcall(function() d.charConn:Disconnect() end) end
+    if d.drawings then for _, obj in pairs(d.drawings) do pcall(function() obj:Remove() end) end end
+    TrackedESP[uid] = nil
+end
+function ToggleTrackedESP(plr)
+    if not plr or plr == LocalPlayer then return false end
+    if TrackedESP[plr.UserId] then removeTrackedESP(plr.UserId) return false end
+    local hl = Instance.new("Highlight")
+    hl.Name = "ConvincerChams_" .. plr.Name
+    hl.FillColor = ESP_ACCENT; hl.FillTransparency = 0.45
+    hl.OutlineColor = Color3.fromRGB(180, 235, 245); hl.OutlineTransparency = 0
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    if plr.Character then hl.Adornee = plr.Character end
+    hl.Parent = PlayerGui
+    local dr = createTrackingDrawings()
+    local data = {player=plr, hl=hl, drawings=dr, charConn=nil}
+    data.charConn = plr.CharacterAdded:Connect(function(nc)
+        if TrackedESP[plr.UserId] and TrackedESP[plr.UserId].hl then TrackedESP[plr.UserId].hl.Adornee = nc end
+    end)
+    TrackedESP[plr.UserId] = data
+    return true
+end
+function removeAllTrackedESP()
+    local ids = {}
+    for uid in pairs(TrackedESP) do ids[#ids+1] = uid end
+    for _, uid in ipairs(ids) do removeTrackedESP(uid) end
+end
+Players.PlayerRemoving:Connect(function(p) if p and TrackedESP[p.UserId] then removeTrackedESP(p.UserId) end end)
+
+if DRAWING_OK then
+    RunService.RenderStepped:Connect(function()
+        if next(TrackedESP) == nil then return end
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local myChar = LocalPlayer.Character
+        local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not myHrp then
+            for _, d in pairs(TrackedESP) do
+                if d.drawings then d.drawings.line.Visible=false d.drawings.arrow.Visible=false d.drawings.nameText.Visible=false end
+            end
+            return
+        end
+        local vp = cam.ViewportSize
+        local bc = Vector2.new(vp.X*0.5, vp.Y)
+        for _, d in pairs(TrackedESP) do
+            local plr, drawings = d.player, d.drawings
+            if drawings then
+                local valid = plr and plr.Parent and plr.Character
+                local head, hrp
+                if valid then head = plr.Character:FindFirstChild("Head") hrp = plr.Character:FindFirstChild("HumanoidRootPart") end
+                if valid and head and hrp then
+                    local hs, on = cam:WorldToViewportPoint(head.Position)
+                    if on and hs.Z > 0 then
+                        local t = Vector2.new(hs.X, hs.Y)
+                        drawings.line.From = bc; drawings.line.To = t; drawings.line.Visible = true
+                        local dir = t - bc
+                        local dist = dir.Magnitude
+                        if dist > 1 then
+                            local nd = dir / dist
+                            local perp = Vector2.new(-nd.Y, nd.X)
+                            local tip = t - nd*18
+                            drawings.arrow.PointA = tip
+                            drawings.arrow.PointB = tip - nd*10 + perp*6
+                            drawings.arrow.PointC = tip - nd*10 - perp*6
+                            drawings.arrow.Visible = true
+                        else drawings.arrow.Visible = false end
+                        drawings.nameText.Position = Vector2.new(hs.X, hs.Y-32)
+                        drawings.nameText.Text = plr.Name
+                        drawings.nameText.Visible = true
+                    else
+                        drawings.line.Visible=false drawings.arrow.Visible=false drawings.nameText.Visible=false
+                    end
+                else
+                    drawings.line.Visible=false drawings.arrow.Visible=false drawings.nameText.Visible=false
+                end
+            end
+        end
+    end)
+end
+
+-- ============================================================ --
+-- TRADE DETECTION
+-- ============================================================ --
+function findTradePartnerLabel()
+    local root = PlayerGui
+    local myName = tostring(LocalPlayer.Name or ""):lower()
+    local myDisplay = tostring(LocalPlayer.DisplayName or ""):lower()
+    local bestName, bestObj, bestScore = nil, nil, -math.huge
+    local function isMe(nm) local x = tostring(nm or ""):lower() return x == myName or x == myDisplay end
+    for _, o in ipairs(root:GetDescendants()) do
+        if o:IsA("TextLabel") and o.Visible then
+            local t = tostring(o.Text or "")
+            local low = t:lower()
+            local nm = t:match("@([%w_]+)'s%s*[Oo]ffer") or t:match("@([%w_]+)'s") or t:match("^([%w_]+)'s%s*[Oo]ffer") or t:match("@([%w_]+)")
+            if nm and not isMe(nm) then
+                local plr = Players:FindFirstChild(nm)
+                if not plr then
+                    for _, q in ipairs(Players:GetPlayers()) do
+                        if q.Name:lower() == nm:lower() or q.DisplayName:lower() == nm:lower() then plr = q break end
+                    end
+                end
+                if plr and plr ~= LocalPlayer and plr.UserId ~= LocalPlayer.UserId then
+                    local score = 0
+                    if low:find("offer",1,true) then score += 1000 end
+                    if low:find("trading",1,true) then score += 300 end
+                    if low:find("trade",1,true) then score += 200 end
+                    if o.AbsoluteSize.X > 0 and o.AbsoluteSize.Y > 0 then score += 1 end
+                    if score > bestScore then bestScore = score bestName = plr.Name bestObj = o end
+                end
+            end
+        end
+    end
+    return bestName, bestObj
+end
+function findTradeChatBox()
+    local root = PlayerGui
+    if not root then return nil end
+    local best, bS = nil, -1
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextBox") and d.Visible then
+            local s = 0
+            local cur, depth = d, 0
+            while cur and depth < 10 do
+                local n = tostring(cur.Name or ""):lower():gsub("%s+", "")
+                local ph = ""
+                pcall(function() ph = tostring(cur.PlaceholderText or ""):lower() end)
+                if n == "normalchat" or n == "restrictedchat" then s += 1000 end
+                if n:find("tradechat",1,true) then s += 900 end
+                if n:find("chatinput",1,true) then s += 700 end
+                if n:find("input",1,true) then s += 100 end
+                if n:find("message",1,true) then s += 100 end
+                if ph:find("digite",1,true) then s += 800 end
+                if ph:find("type",1,true) then s += 100 end
+                if ph:find("message",1,true) then s += 100 end
+                if ph:find("chat",1,true) then s += 100 end
+                cur = cur.Parent; depth += 1
+            end
+            if s > bS then best, bS = d, s end
+        end
+    end
+    if bS < 100 then return nil end
+    return best
+end
+function sendViaTCS(text)
+    local ok, sent = pcall(function()
+        local TCS = game:GetService("TextChatService")
+        local chs = TCS and TCS:FindFirstChild("TextChannels")
+        if not chs then return false end
+        for _, ch in ipairs(chs:GetChildren()) do
+            if ch:IsA("TextChannel") and ch.Name:lower():find("trade",1,true) then
+                local g = pcall(function() ch:SendAsync(text) end)
+                if g then return true end
+            end
+        end
+        return false
+    end)
+    return ok and sent == true
+end
+function isTradeOpen()
+    local nm = findTradePartnerLabel()
+    return nm ~= nil and nm ~= ""
+end
+function sendTradeChatInstant(text)
+    if type(text) ~= "string" or text == "" then return false end
+    if not isTradeOpen() then return false end
+    local box = findTradeChatBox()
+    if box and box:IsA("TextBox") and box.Visible then
+        local ok = pcall(function()
+            box.ClearTextOnFocus = false
+            box:CaptureFocus()
+            task.wait(0.03)
+            box.Text = text
+            box.CursorPosition = #text + 1
+            VIM:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+            VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+            if box:IsFocused() then pcall(function() box:ReleaseFocus(true) end) end
+        end)
+        if ok then return true end
+    end
+    return sendViaTCS(text)
+end
+
+-- ============================================================ --
+-- AUTO SEND
+-- ============================================================ --
+AUTO_SEND_MSGS = {
+    pt = {"Oii", "Você pode me ajudar a gravar um vídeo de 1 min? Vou te dar um Elephant no Steal an Egg pra index"},
+    es = {"Hola", "Me ayudas a grabar un video de 1 min? ¡Te daré un Elephant en Steal an Egg para tu índice"},
+    en = {"Hii", "Can you help me record a video for 1 min? I'll give you an Elephant in Steal an Egg for your index"},
+}
+function StopAutoSend()
+    AutoSendRunning = false
+    AutoSendAbortFlag = true
+end
+function RunAutoSendSequence(targetUserId)
+    if AutoSendRunning then return end
+    AutoSendRunning = true
+    AutoSendAbortFlag = false
+    local msgs = AUTO_SEND_MSGS[AutoSendLang] or AUTO_SEND_MSGS.en
+    local M1, M2 = msgs[1], msgs[2]
+    task.spawn(function()
+        task.wait(0.5)
+        if AutoSendAbortFlag or not AutoSendEnabled then AutoSendRunning = false return end
+        if not isTradeOpen() then AutoSendRunning = false return end
+        if currentPartnerId ~= targetUserId then AutoSendRunning = false return end
+        sendTradeChatInstant(M1)
+        local elapsed = 0
+        while elapsed < 5 do
+            task.wait(0.25); elapsed = elapsed + 0.25
+            if AutoSendAbortFlag or not AutoSendEnabled then AutoSendRunning = false return end
+            if not isTradeOpen() then AutoSendRunning = false return end
+            if currentPartnerId ~= targetUserId then AutoSendRunning = false return end
+        end
+        if AutoSendAbortFlag or not AutoSendEnabled then AutoSendRunning = false return end
+        if not isTradeOpen() then AutoSendRunning = false return end
+        if currentPartnerId ~= targetUserId then AutoSendRunning = false return end
+        sendTradeChatInstant(M2)
+        AutoSendRunning = false
+    end)
+end
+
+-- ============================================================ --
+-- UI
+-- ============================================================ --
+__RADAR_UI = {}
+__RADAR_UI.Screen = Instance.new("ScreenGui")
+__RADAR_UI.Screen.Name = "Convincer"
+__RADAR_UI.Screen.ResetOnSpawn = false
+__RADAR_UI.Screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+__RADAR_UI.Screen.Parent = PlayerGui
+__RADAR_UI.WIN_W = 360
+__RADAR_UI.WIN_H = 500
+
+UI_BG          = Color3.fromRGB(10, 14, 20)
+UI_CARD        = Color3.fromRGB(20, 26, 36)
+UI_CARD_ALT    = Color3.fromRGB(28, 36, 48)
+UI_BORDER      = Color3.fromRGB(44, 56, 74)
+UI_TEXT        = Color3.fromRGB(232, 242, 252)
+UI_MUTED       = Color3.fromRGB(120, 138, 160)
+UI_ACTIVE      = Color3.fromRGB(34, 200, 220)
+UI_OFF         = Color3.fromRGB(36, 44, 58)
+UI_ACCENT      = Color3.fromRGB(34, 200, 220)
+UI_ACCENT_SOFT = Color3.fromRGB(20, 130, 150)
+UI_DANGER      = Color3.fromRGB(240, 80, 100)
+
+Win = Instance.new("Frame")
+Win.Name = "Win"
+Win.Size = UDim2.new(0, __RADAR_UI.WIN_W, 0, __RADAR_UI.WIN_H)
+Win.Position = UDim2.new(0.5, -__RADAR_UI.WIN_W/2, 0.5, -__RADAR_UI.WIN_H/2)
+Win.BackgroundColor3 = UI_BG
+Win.BorderSizePixel = 0; Win.ZIndex = 3; Win.Parent = __RADAR_UI.Screen
+AddCorner(Win, 14); AddStroke(Win, UI_BORDER, 1)
+
+LoadConfig()
+
+__RADAR_UI.HDR_H = 42
+__RADAR_UI.Hdr = Instance.new("Frame")
+__RADAR_UI.Hdr.Size = UDim2.new(1, -16, 0, __RADAR_UI.HDR_H)
+__RADAR_UI.Hdr.Position = UDim2.new(0, 8, 0, 8)
+__RADAR_UI.Hdr.BackgroundColor3 = UI_CARD
+__RADAR_UI.Hdr.BorderSizePixel = 0; __RADAR_UI.Hdr.Active = true
+__RADAR_UI.Hdr.ZIndex = 5; __RADAR_UI.Hdr.Parent = Win
+AddCorner(__RADAR_UI.Hdr, 11); AddStroke(__RADAR_UI.Hdr, UI_BORDER, 1)
+
+do
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.new(0, 8, 0, 8); dot.Position = UDim2.new(0, 14, 0.5, -4)
+    dot.BackgroundColor3 = UI_ACCENT; dot.BorderSizePixel = 0
+    dot.ZIndex = 6; dot.Parent = __RADAR_UI.Hdr
+    AddCorner(dot, 999)
+    local TitleLbl = Instance.new("TextLabel")
+    TitleLbl.Size = UDim2.new(1, -80, 1, 0); TitleLbl.Position = UDim2.new(0, 30, 0, 0)
+    TitleLbl.BackgroundTransparency = 1; TitleLbl.Text = "CONVINCER"
+    TitleLbl.TextColor3 = UI_ACCENT; TitleLbl.Font = Enum.Font.GothamBlack
+    TitleLbl.TextSize = 13; TitleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    TitleLbl.ZIndex = 6; TitleLbl.Parent = __RADAR_UI.Hdr
+end
+
+CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 26, 0, 26); CloseBtn.Position = UDim2.new(1, -34, 0.5, -13)
+CloseBtn.BackgroundColor3 = UI_OFF; CloseBtn.BorderSizePixel = 0
+CloseBtn.Text = "X"; CloseBtn.TextSize = 11; CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextColor3 = UI_TEXT; CloseBtn.AutoButtonColor = true
+CloseBtn.ZIndex = 8; CloseBtn.Parent = __RADAR_UI.Hdr
+AddCorner(CloseBtn, 999)
+CloseBtn.Activated:Connect(function()
+    SaveConfig(); scannerEnabled = false; StopAutoSend()
+    if scannerConnection then pcall(scannerConnection.Disconnect, scannerConnection) end
+    clearAllPriorityTags()
+    for plot in pairs(BaseMarks) do clearBaseMark(plot) end
+    removeAllTrackedESP()
+    if __RADAR_UI.Screen then __RADAR_UI.Screen:Destroy() end
+end)
+
+MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 26, 0, 26); MinBtn.Position = UDim2.new(1, -66, 0.5, -13)
+MinBtn.BackgroundColor3 = UI_OFF; MinBtn.BorderSizePixel = 0
+MinBtn.Text = "-"; MinBtn.TextSize = 13; MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextColor3 = UI_TEXT; MinBtn.AutoButtonColor = true
+MinBtn.ZIndex = 8; MinBtn.Parent = __RADAR_UI.Hdr
+AddCorner(MinBtn, 999)
+
+do
+    local dragging, dragStart, winStart
+    __RADAR_UI.Hdr.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; dragStart = inp.Position; winStart = Win.Position
+        end
+    end)
+    __RADAR_UI.Hdr.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = false; SaveConfig()
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+            local d = inp.Position - dragStart
+            Win.Position = UDim2.new(winStart.X.Scale, winStart.X.Offset + d.X, winStart.Y.Scale, winStart.Y.Offset + d.Y)
+        end
+    end)
+end
+
+__RADAR_UI.TBAR_H = 36
+__RADAR_UI.TabBar = Instance.new("Frame")
+__RADAR_UI.TabBar.Size = UDim2.new(1, -16, 0, __RADAR_UI.TBAR_H)
+__RADAR_UI.TabBar.Position = UDim2.new(0, 8, 0, __RADAR_UI.HDR_H + 12)
+__RADAR_UI.TabBar.BackgroundColor3 = UI_CARD
+__RADAR_UI.TabBar.BorderSizePixel = 0; __RADAR_UI.TabBar.ZIndex = 5
+__RADAR_UI.TabBar.Parent = Win
+AddCorner(__RADAR_UI.TabBar, 12); AddStroke(__RADAR_UI.TabBar, UI_BORDER, 1)
+do
+    local tabLayout = Instance.new("UIListLayout")
+    tabLayout.FillDirection = Enum.FillDirection.Horizontal
+    tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    tabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    tabLayout.Padding = UDim.new(0, 6); tabLayout.Parent = __RADAR_UI.TabBar
+end
+
+__RADAR_UI.ContentArea = Instance.new("Frame")
+__RADAR_UI.ContentArea.Size = UDim2.new(1, -16, 1, -(__RADAR_UI.HDR_H + __RADAR_UI.TBAR_H + 28))
+__RADAR_UI.ContentArea.Position = UDim2.new(0, 8, 0, __RADAR_UI.HDR_H + __RADAR_UI.TBAR_H + 20)
+__RADAR_UI.ContentArea.BackgroundTransparency = 1
+__RADAR_UI.ContentArea.ClipsDescendants = true
+__RADAR_UI.ContentArea.ZIndex = 2; __RADAR_UI.ContentArea.Parent = Win
+
+function MakeScroll(parent)
+    local s = Instance.new("ScrollingFrame")
+    s.Size = UDim2.new(1, 0, 1, 0)
+    s.BackgroundTransparency = 1; s.BorderSizePixel = 0
+    s.ScrollBarThickness = 3; s.ScrollBarImageColor3 = UI_ACCENT_SOFT
+    s.CanvasSize = UDim2.new(0, 0, 0, 0)
+    s.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    s.ScrollingDirection = Enum.ScrollingDirection.Y
+    s.ZIndex = 2; s.Parent = parent
+    local lay = Instance.new("UIListLayout")
+    lay.FillDirection = Enum.FillDirection.Vertical
+    lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    lay.Padding = UDim.new(0, 8); lay.Parent = s
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 6); pad.PaddingBottom = UDim.new(0, 10)
+    pad.PaddingLeft = UDim.new(0, 4); pad.PaddingRight = UDim.new(0, 4)
+    pad.Parent = s
+    return s
+end
+
+__RADAR_UI.Tabs = {}
+__RADAR_UI.ActiveTab = nil
+function ActivateTab(tab)
+    if __RADAR_UI.ActiveTab == tab then return end
+    if __RADAR_UI.ActiveTab then
+        __RADAR_UI.ActiveTab.page.Visible = false
+        TweenService:Create(__RADAR_UI.ActiveTab.btn, TweenInfo.new(0.15), {BackgroundColor3 = UI_CARD, TextColor3 = UI_MUTED}):Play()
+    end
+    __RADAR_UI.ActiveTab = tab
+    tab.page.Visible = true
+    TweenService:Create(tab.btn, TweenInfo.new(0.15), {BackgroundColor3 = UI_ACTIVE, TextColor3 = Color3.fromRGB(0,0,0)}):Play()
+end
+function CreateTab(name)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1/3, -4, 1, -8)
+    btn.BackgroundColor3 = UI_CARD; btn.BorderSizePixel = 0
+    btn.Text = name; btn.TextColor3 = UI_MUTED
+    btn.Font = Enum.Font.GothamBlack; btn.TextSize = 9
+    btn.AutoButtonColor = true; btn.ZIndex = 6; btn.Parent = __RADAR_UI.TabBar
+    AddCorner(btn, 999)
+    local page = Instance.new("Frame")
+    page.Size = UDim2.new(1, 0, 1, 0); page.BackgroundTransparency = 1
+    page.Visible = false; page.ClipsDescendants = true
+    page.ZIndex = 2; page.Parent = __RADAR_UI.ContentArea
+    local scroll = MakeScroll(page)
+    local tab = {btn=btn, page=page, scroll=scroll}
+    btn.Activated:Connect(function() ActivateTab(tab) end)
+    table.insert(__RADAR_UI.Tabs, tab)
+    return tab
+end
+__RADAR_UI.ListTab = CreateTab("LIST")
+__RADAR_UI.ConfigTab = CreateTab("SETTINGS")
+__RADAR_UI.ConvincerTab = CreateTab("PRESETS")
+
+function CreateCard(parent, height)
+    local card = Instance.new("Frame")
+    card.Size = UDim2.new(1, -4, 0, height)
+    card.BackgroundColor3 = UI_CARD; card.BorderSizePixel = 0
+    card.Parent = parent
+    AddCorner(card, 10); AddStroke(card, UI_BORDER, 1)
+    return card
+end
+function CreateButton(parent, text, size, position, active)
+    local b = Instance.new("TextButton")
+    b.Size = size; b.Position = position
+    b.BackgroundColor3 = active and UI_ACTIVE or UI_OFF
+    b.BorderSizePixel = 0; b.Text = text
+    b.TextColor3 = active and Color3.fromRGB(0,0,0) or UI_TEXT
+    b.Font = Enum.Font.GothamBold; b.TextSize = 8; b.AutoButtonColor = true
+    b.Parent = parent
+    AddCorner(b, 999); AddStroke(b, UI_BORDER, 1)
+    b.Activated:Connect(function() pcall(PlayUIClickSound) end)
+    return b
+end
+function CreateToggle(parent, title, desc, initial, callback, extraBtn)
+    local card = CreateCard(parent, 56)
+    local name = Instance.new("TextLabel")
+    name.Size = UDim2.new(1, -100, 0, 16); name.Position = UDim2.new(0, 12, 0, 8)
+    name.BackgroundTransparency = 1; name.Text = title
+    name.TextColor3 = UI_TEXT; name.Font = Enum.Font.GothamBold
+    name.TextSize = 9; name.TextXAlignment = Enum.TextXAlignment.Left
+    name.Parent = card
+    local sub = Instance.new("TextLabel")
+    sub.Size = UDim2.new(1, -100, 0, 12); sub.Position = UDim2.new(0, 12, 0, 28)
+    sub.BackgroundTransparency = 1; sub.Text = desc
+    sub.TextColor3 = UI_MUTED; sub.Font = Enum.Font.GothamMedium
+    sub.TextSize = 6.5; sub.TextXAlignment = Enum.TextXAlignment.Left
+    sub.TextTruncate = Enum.TextTruncate.AtEnd
+    sub.Parent = card
+    local state = initial == true
+    local TRACK_W, TRACK_H, KNOB_PAD = 44, 22, 3
+    local KNOB_D = TRACK_H - KNOB_PAD * 2
+    local track = Instance.new("TextButton")
+    track.Size = UDim2.new(0, TRACK_W, 0, TRACK_H)
+    track.Position = UDim2.new(1, -TRACK_W - 12, 0.5, -TRACK_H/2)
+    track.BackgroundColor3 = state and UI_ACCENT or UI_OFF
+    track.BorderSizePixel = 0; track.Text = ""
+    track.AutoButtonColor = false; track.Parent = card
+    AddCorner(track, 999)
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, KNOB_D, 0, KNOB_D)
+    knob.Position = state and UDim2.new(0, TRACK_W-KNOB_D-KNOB_PAD, 0, KNOB_PAD) or UDim2.new(0, KNOB_PAD, 0, KNOB_PAD)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0; knob.ZIndex = 2; knob.Parent = track
+    AddCorner(knob, 999)
+    local function render(anim)
+        local tp = state and UDim2.new(0, TRACK_W-KNOB_D-KNOB_PAD, 0, KNOB_PAD) or UDim2.new(0, KNOB_PAD, 0, KNOB_PAD)
+        local tc = state and UI_ACCENT or UI_OFF
+        if anim then
+            TweenService:Create(knob, TweenInfo.new(0.15), {Position = tp}):Play()
+            TweenService:Create(track, TweenInfo.new(0.15), {BackgroundColor3 = tc}):Play()
+        else knob.Position = tp; track.BackgroundColor3 = tc end
+    end
+    track.Activated:Connect(function()
+        state = not state; render(true); pcall(PlayUIClickSound)
+        if callback then callback(state) end
+    end)
+    render(false)
+    if extraBtn then
+        local eb = Instance.new("TextButton")
+        eb.Size = UDim2.new(0, 22, 0, 22)
+        eb.Position = UDim2.new(1, -TRACK_W - 38, 0.5, -11)
+        eb.BackgroundColor3 = UI_CARD_ALT; eb.BorderSizePixel = 0
+        eb.Text = "..."; eb.TextColor3 = UI_TEXT
+        eb.Font = Enum.Font.GothamBold; eb.TextSize = 12
+        eb.AutoButtonColor = true; eb.Parent = card
+        AddCorner(eb, 999); AddStroke(eb, UI_BORDER, 1)
+        eb.Activated:Connect(function() pcall(PlayUIClickSound) if extraBtn.onClick then extraBtn.onClick(eb) end end)
+        return card, track, eb
+    end
+    return card, track
+end
+
+-- ============================================================ --
+-- LIST
+-- ============================================================ --
+DragonCountCard = CreateCard(__RADAR_UI.ListTab.scroll, 48)
+DragonCountLabel = Instance.new("TextLabel")
+DragonCountLabel.Size = UDim2.new(1, -110, 1, 0); DragonCountLabel.Position = UDim2.new(0, 14, 0, 0)
+DragonCountLabel.BackgroundTransparency = 1
+DragonCountLabel.Text = "PRIORITY OWNERS"
+DragonCountLabel.TextColor3 = UI_TEXT; DragonCountLabel.Font = Enum.Font.GothamBlack
+DragonCountLabel.TextSize = 10; DragonCountLabel.TextXAlignment = Enum.TextXAlignment.Left
+DragonCountLabel.Parent = DragonCountCard
+
+ListRefreshBtn = CreateButton(DragonCountCard, "REFRESH", UDim2.new(0, 62, 0, 26), UDim2.new(1, -74, 0.5, -13), false)
+listRefreshBusy = false
+ListRefreshBtn.Activated:Connect(function()
+    if listRefreshBusy then return end
+    listRefreshBusy = true
+    UpdateDragonList(); ListRefreshBtn.Text = "..."
+    task.spawn(function()
+        pcall(ForceRescanPriorities); pcall(ScanAll)
+        task.wait(0.1); pcall(UpdateDragonList)
+        if ListRefreshBtn and ListRefreshBtn.Parent then ListRefreshBtn.Text = "REFRESH" end
+        listRefreshBusy = false
+    end)
+end)
+
+function CreateDragonButton(parent, text, x, width)
+    return CreateButton(parent, text, UDim2.new(0, width or 38, 0, 22), UDim2.new(1, x, 0, 8), false)
+end
+
+lastListSig = nil
+function UpdateDragonList()
+    if not __RADAR_UI.ListTab or not __RADAR_UI.ListTab.scroll then return end
+    local entries, sigParts = {}, {}
+    for uid, plr in pairs(dragonOwners) do
+        if plr and plr.Parent == Players then
+            local items = dragonItems[uid] or {}
+            local dedup, seen = {}, {}
+            for _, it in ipairs(items) do
+                if it and it.Name then
+                    local key = tostring(it.Name):lower()
+                    if not seen[key] then seen[key] = true table.insert(dedup, it) end
+                end
+            end
+            dragonItems[uid] = dedup
+            if #dedup > 0 then
+                table.insert(entries, {UserId=uid, Player=plr, Items=dedup, IsOnline=true})
+                local names = {}
+                for _, it in ipairs(dedup) do names[#names+1] = tostring(it.Name):lower() end
+                table.sort(names)
+                sigParts[#sigParts+1] = tostring(uid) .. ":" .. table.concat(names, ",")
+            end
+        end
+    end
+    table.sort(sigParts)
+    local sigStr = table.concat(sigParts, "|")
+    if sigStr == lastListSig then return end
+    lastListSig = sigStr
+    for _, c in ipairs(__RADAR_UI.ListTab.scroll:GetChildren()) do
+        if c:IsA("Frame") and c ~= DragonCountCard then c:Destroy() end
+    end
+    table.sort(entries, function(a, b) return tostring(a.Player.Name):lower() < tostring(b.Player.Name):lower() end)
+    if #entries == 0 then
+        local empty = CreateCard(__RADAR_UI.ListTab.scroll, 46)
+        local txt = Instance.new("TextLabel")
+        txt.Size = UDim2.new(1,0,1,0); txt.BackgroundTransparency = 1
+        txt.Text = "NO PRIORITY OWNERS"; txt.TextColor3 = UI_MUTED
+        txt.Font = Enum.Font.GothamBold; txt.TextSize = 8
+        txt.Parent = empty
+        return
+    end
+    for index, entry in ipairs(entries) do
+        local row = CreateCard(__RADAR_UI.ListTab.scroll, 62)
+        row.LayoutOrder = index
+        local avatar = Instance.new("ImageLabel")
+        avatar.Size = UDim2.new(0, 40, 0, 40); avatar.Position = UDim2.new(0, 12, 0.5, -20)
+        avatar.BackgroundColor3 = UI_OFF
+        avatar.Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(entry.UserId) .. "&w=100&h=100"
+        avatar.Parent = row; AddCorner(avatar, 999)
+        local nm = Instance.new("TextLabel")
+        nm.Size = UDim2.new(0, 120, 0, 15); nm.Position = UDim2.new(0, 62, 0, 8)
+        nm.BackgroundTransparency = 1; nm.Text = tostring(entry.Player.Name or "Unknown")
+        nm.TextColor3 = UI_TEXT; nm.Font = Enum.Font.GothamBold
+        nm.TextSize = 8; nm.TextXAlignment = Enum.TextXAlignment.Left
+        nm.TextTruncate = Enum.TextTruncate.AtEnd; nm.Parent = row
+        local status = Instance.new("TextLabel")
+        status.Size = UDim2.new(0, 120, 0, 11); status.Position = UDim2.new(0, 62, 0, 25)
+        status.BackgroundTransparency = 1
+        status.Text = "ONLINE  " .. tostring(#entry.Items) .. " priority"
+        status.TextColor3 = UI_ACCENT; status.Font = Enum.Font.GothamBold
+        status.TextSize = 6.5; status.TextXAlignment = Enum.TextXAlignment.Left
+        status.Parent = row
+        local names = {}
+        for _, it in ipairs(entry.Items) do table.insert(names, tostring(it.Name)) end
+        local dn = Instance.new("TextLabel")
+        dn.Size = UDim2.new(0, 140, 0, 12); dn.Position = UDim2.new(0, 62, 0, 40)
+        dn.BackgroundTransparency = 1; dn.Text = table.concat(names, ", ")
+        dn.TextColor3 = UI_MUTED; dn.Font = Enum.Font.GothamMedium
+        dn.TextSize = 6; dn.TextXAlignment = Enum.TextXAlignment.Left
+        dn.TextTruncate = Enum.TextTruncate.AtEnd; dn.Parent = row
+        local espBtn = CreateDragonButton(row, "ESP", -190, 40)
+        espBtn.BackgroundColor3 = UI_ACCENT; espBtn.TextColor3 = Color3.fromRGB(0,0,0)
+        espBtn.AutoButtonColor = false
+        if TrackedESP[entry.UserId] then espBtn.Text = "ON" espBtn.BackgroundColor3 = UI_ACCENT_SOFT espBtn.TextColor3 = UI_TEXT end
+        espBtn.Activated:Connect(function()
+            local active = ToggleTrackedESP(entry.Player)
+            if active then espBtn.Text = "ON" espBtn.BackgroundColor3 = UI_ACCENT_SOFT espBtn.TextColor3 = UI_TEXT
+            else espBtn.Text = "ESP" espBtn.BackgroundColor3 = UI_ACCENT espBtn.TextColor3 = Color3.fromRGB(0,0,0) end
+        end)
+        local add = CreateDragonButton(row, "ADD", -44, 38)
+        add.Activated:Connect(function()
+            if entry.IsOnline and SendFriendRequest(entry.Player) then add.Text = "OK" else add.Text = "OFF" end
+            task.delay(0.8, function() if add and add.Parent then add.Text = "ADD" end end)
+        end)
+        local tp = CreateDragonButton(row, "TP", -86, 38)
+        tp.Activated:Connect(function()
+            if not entry.IsOnline then tp.Text = "OFF" return end
+            tp.Text = "..."
+            task.spawn(function()
+                local ok, why = RawTeleportToBase(entry.Player)
+                if tp and tp.Parent then tp.Text = ok and "OK" or "ERR" end
+                task.delay(1, function() if tp and tp.Parent then tp.Text = "TP" end end)
+                if not ok then warn("[TP] " .. tostring(why) .. " -> " .. entry.Player.Name) end
+            end)
+        end)
+        local trade = CreateDragonButton(row, "TRADE", -145, 54)
+        trade.Activated:Connect(function()
+            if not entry.IsOnline then trade.Text = "OFF" return end
+            trade.Text = "..."
+            task.spawn(function()
+                local ok, reason = Actions.sendTrade(entry.UserId)
+                if trade and trade.Parent then trade.Text = ok and "SENT" or (reason or "ERR") end
+                task.delay(1, function() if trade and trade.Parent then trade.Text = "TRADE" end end)
+            end)
+        end)
+    end
+end
+
+-- ============================================================ --
+-- LANGUAGE PICKER
+-- ============================================================ --
+LangPicker = nil
+function ShowLangPicker(anchor)
+    if LangPicker and LangPicker.Parent then LangPicker:Destroy() LangPicker = nil return end
+    local p = Instance.new("Frame")
+    p.Size = UDim2.new(0, 130, 0, 100)
+    local ap = anchor.AbsolutePosition
+    p.Position = UDim2.fromOffset(ap.X - 90, ap.Y + 28)
+    p.BackgroundColor3 = UI_CARD; p.BorderSizePixel = 0
+    p.ZIndex = 300; p.Parent = __RADAR_UI.Screen
+    AddCorner(p, 12); AddStroke(p, UI_ACCENT, 1)
+    local lay = Instance.new("UIListLayout")
+    lay.Padding = UDim.new(0, 3); lay.Parent = p
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 6); pad.PaddingBottom = UDim.new(0, 6)
+    pad.PaddingLeft = UDim.new(0, 6); pad.PaddingRight = UDim.new(0, 6)
+    pad.Parent = p
+    local opts = {{id="pt", label="Português"},{id="es", label="Español"},{id="en", label="English"}}
+    for _, o in ipairs(opts) do
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 0, 24)
+        b.BackgroundColor3 = (AutoSendLang == o.id) and UI_ACCENT or UI_CARD_ALT
+        b.BorderSizePixel = 0; b.Text = o.label
+        b.TextColor3 = (AutoSendLang == o.id) and Color3.fromRGB(0,0,0) or UI_TEXT
+        b.Font = Enum.Font.GothamBold; b.TextSize = 8; b.AutoButtonColor = true
+        b.Parent = p; AddCorner(b, 999)
+        b.Activated:Connect(function()
+            AutoSendLang = o.id; SaveConfig()
+            if LangPicker then LangPicker:Destroy() LangPicker = nil end
+        end)
+    end
+    LangPicker = p
+end
+
+-- ============================================================ --
+-- MODAL
+-- ============================================================ --
+NoMoreModal = nil
+function ShowNoMorePriorityModal()
+    if NoMoreModal and NoMoreModal.Parent then return end
+    local m = Instance.new("Frame")
+    m.Size = UDim2.new(0, 340, 0, 190)
+    m.Position = UDim2.new(0.5, -170, 0.5, -95)
+    m.BackgroundColor3 = UI_CARD; m.BorderSizePixel = 0
+    m.ZIndex = 500; m.Parent = __RADAR_UI.Screen
+    AddCorner(m, 14); AddStroke(m, UI_ACCENT, 2)
+    local t1 = Instance.new("TextLabel")
+    t1.Size = UDim2.new(1, -20, 0, 26); t1.Position = UDim2.new(0, 10, 0, 22)
+    t1.BackgroundTransparency = 1; t1.Text = "NO MORE PRIORITY"
+    t1.TextColor3 = UI_ACCENT; t1.Font = Enum.Font.GothamBlack
+    t1.TextSize = 16; t1.Parent = m
+    local t2 = Instance.new("TextLabel")
+    t2.Size = UDim2.new(1, -20, 0, 20); t2.Position = UDim2.new(0, 10, 0, 62)
+    t2.BackgroundTransparency = 1; t2.Text = "You want join another server?"
+    t2.TextColor3 = UI_TEXT; t2.Font = Enum.Font.GothamBold
+    t2.TextSize = 11; t2.Parent = m
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -20, 0, 40); row.Position = UDim2.new(0, 10, 1, -60)
+    row.BackgroundTransparency = 1; row.Parent = m
+    local lay = Instance.new("UIListLayout")
+    lay.FillDirection = Enum.FillDirection.Horizontal
+    lay.Padding = UDim.new(0, 8); lay.Parent = row
+    for _, tier in ipairs({"NORMAL", "PRO", "OG"}) do
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1/3, -6, 1, 0)
+        b.BackgroundColor3 = UI_OFF; b.BorderSizePixel = 0
+        b.Text = tier; b.TextColor3 = UI_TEXT
+        b.Font = Enum.Font.GothamBlack; b.TextSize = 11
+        b.Parent = row; AddCorner(b, 999); AddStroke(b, UI_BORDER, 1)
+        b.Activated:Connect(function()
+            local map = {NORMAL="Normal", PRO="Pro", OG="OG"}
+            PlazaTier = map[tier]; SaveConfig()
+            if NoMoreModal then NoMoreModal:Destroy() NoMoreModal = nil end
+            local placeId = PLAZA_PLACE_IDS[PlazaTier]
+            task.spawn(function() pcall(function() TeleportService:Teleport(placeId, LocalPlayer) end) end)
+        end)
+    end
+    local closeB = Instance.new("TextButton")
+    closeB.Size = UDim2.new(0, 26, 0, 26); closeB.Position = UDim2.new(1, -34, 0, 12)
+    closeB.BackgroundColor3 = UI_OFF; closeB.BorderSizePixel = 0
+    closeB.Text = "X"; closeB.TextColor3 = UI_TEXT
+    closeB.Font = Enum.Font.GothamBold; closeB.TextSize = 11
+    closeB.Parent = m; AddCorner(closeB, 999)
+    closeB.Activated:Connect(function() if NoMoreModal then NoMoreModal:Destroy() NoMoreModal = nil end end)
+    NoMoreModal = m
+end
+
+PriorityNotify = nil
+function ShowPriorityNotify(plr, brainrotName)
+    if PriorityNotify and PriorityNotify.Parent then PriorityNotify:Destroy() PriorityNotify = nil end
+    local n = Instance.new("Frame")
+    n.Size = UDim2.new(0, 340, 0, 58)
+    n.Position = UDim2.new(0.5, -170, 0, -80)
+    n.BackgroundColor3 = UI_CARD; n.BorderSizePixel = 0
+    n.ZIndex = 400; n.Parent = __RADAR_UI.Screen
+    AddCorner(n, 14); AddStroke(n, UI_ACCENT, 2)
+    local pfp = Instance.new("ImageLabel")
+    pfp.Size = UDim2.new(0, 40, 0, 40); pfp.Position = UDim2.new(0, 10, 0.5, -20)
+    pfp.BackgroundColor3 = UI_OFF
+    pfp.Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(plr.UserId) .. "&w=100&h=100"
+    pfp.Parent = n; AddCorner(pfp, 999)
+    local t1 = Instance.new("TextLabel")
+    t1.Size = UDim2.new(1, -70, 0, 16); t1.Position = UDim2.new(0, 60, 0, 10)
+    t1.BackgroundTransparency = 1
+    t1.Text = tostring(plr.Name) .. "  sent you a trade!"
+    t1.TextColor3 = UI_TEXT; t1.Font = Enum.Font.GothamBold
+    t1.TextSize = 10; t1.TextXAlignment = Enum.TextXAlignment.Left
+    t1.TextTruncate = Enum.TextTruncate.AtEnd; t1.Parent = n
+    local t2 = Instance.new("TextLabel")
+    t2.Size = UDim2.new(1, -70, 0, 14); t2.Position = UDim2.new(0, 60, 0, 30)
+    t2.BackgroundTransparency = 1
+    t2.Text = "PRIORITY: " .. tostring(brainrotName)
+    t2.TextColor3 = UI_ACCENT; t2.Font = Enum.Font.GothamBold
+    t2.TextSize = 8; t2.TextXAlignment = Enum.TextXAlignment.Left
+    t2.TextTruncate = Enum.TextTruncate.AtEnd; t2.Parent = n
+    TweenService:Create(n, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0.5, -170, 0, 20)}):Play()
+    task.delay(6, function()
+        if not n or not n.Parent then return end
+        TweenService:Create(n, TweenInfo.new(0.35), {Position = UDim2.new(0.5, -170, 0, -80)}):Play()
+        task.wait(0.4); if n then n:Destroy() end
+        if PriorityNotify == n then PriorityNotify = nil end
+    end)
+    PriorityNotify = n
+end
+
+function DetectPriorityTradeRequest()
+    for _, o in ipairs(PlayerGui:GetDescendants()) do
+        if o:IsA("TextLabel") and o.Visible then
+            local t = tostring(o.Text):lower()
+            if t:find("want") and (t:find("trade") or t:find("trocar")) then
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if plr ~= LocalPlayer and t:find(plr.Name:lower(), 1, true) then
+                        if dragonOwners[plr.UserId] then
+                            local now = tick()
+                            if not seenTradeNotifs["req_"..plr.UserId] or now - seenTradeNotifs["req_"..plr.UserId] > 30 then
+                                seenTradeNotifs["req_"..plr.UserId] = now
+                                local items = dragonItems[plr.UserId] or {}
+                                local br = items[1] and items[1].Name or "priority"
+                                ShowPriorityNotify(plr, br)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================ --
+-- SETTINGS
+-- ============================================================ --
+CreateToggle(__RADAR_UI.ConfigTab.scroll, "Priority Scanner", "Detecta prioridades e atualiza as bases", scannerEnabled, function(state)
+    scannerEnabled = state
+    if state then task.spawn(ScanAll) ForceRescanPriorities() else ClearESP() end
+end)
+CreateToggle(__RADAR_UI.ConfigTab.scroll, "ESP Player", "Mostra prioridades acima dos jogadores", ESPPlayerEnabled, function(state)
+    ESPPlayerEnabled = state; SaveConfig(); ForceRescanPriorities()
+end)
+CreateToggle(__RADAR_UI.ConfigTab.scroll, "Alert Sounds", "Sons dos alertas de prioridade", soundsEnabled, function(state)
+    soundsEnabled = state; SaveConfig()
+end)
+CreateToggle(__RADAR_UI.ConfigTab.scroll, "Auto Send", "Detecta trade → msg1 → 5s → msg2",
+    AutoSendEnabled,
+    function(state)
+        AutoSendEnabled = state
+        if not state then StopAutoSend() AutoSendHandledPartner = nil end
+        SaveConfig()
+    end,
+    { onClick = function(btn) ShowLangPicker(btn) end }
+)
+CreateToggle(__RADAR_UI.ConfigTab.scroll, "FPS Optimizer", "Sombras, partículas, luzes, pós-efeitos off",
+    fpsOptimizerEnabled,
+    function(state)
+        fpsOptimizerEnabled = state
+        if state then ApplyFPSOptimizer() else RemoveFPSOptimizer() end
+        SaveConfig()
+    end
+)
+
+priCard = CreateCard(__RADAR_UI.ConfigTab.scroll, 190)
+priInput = Instance.new("TextBox")
+priInput.Size = UDim2.new(1, -52, 0, 30); priInput.Position = UDim2.new(0, 8, 0, 8)
+priInput.BackgroundColor3 = UI_CARD_ALT; priInput.BorderSizePixel = 0
+priInput.Font = Enum.Font.Gotham; priInput.PlaceholderText = "Search brainrot"
+priInput.PlaceholderColor3 = UI_MUTED; priInput.Text = ""
+priInput.TextSize = 9; priInput.TextColor3 = UI_TEXT
+priInput.TextXAlignment = Enum.TextXAlignment.Left
+priInput.ClearTextOnFocus = false; priInput.Parent = priCard
+AddCorner(priInput, 999); AddStroke(priInput, UI_BORDER, 1)
+priAddBtn = CreateButton(priCard, "ADD", UDim2.new(0, 38, 0, 30), UDim2.new(1, -46, 0, 8), true)
+priAddBtn.TextColor3 = Color3.fromRGB(0,0,0)
+chipStrip = Instance.new("ScrollingFrame")
+chipStrip.Size = UDim2.new(1, -16, 0, 82); chipStrip.Position = UDim2.new(0, 8, 0, 46)
+chipStrip.BackgroundTransparency = 1; chipStrip.BorderSizePixel = 0
+chipStrip.ScrollBarThickness = 3; chipStrip.ScrollBarImageColor3 = UI_ACCENT_SOFT
+chipStrip.CanvasSize = UDim2.new(0,0,0,0); chipStrip.AutomaticCanvasSize = Enum.AutomaticSize.Y
+chipStrip.Parent = priCard
+do local chipLayout = Instance.new("UIListLayout") chipLayout.Padding = UDim.new(0, 3) chipLayout.Parent = chipStrip end
+priEmpty = Instance.new("TextLabel")
+priEmpty.Size = UDim2.new(1,0,0,18); priEmpty.BackgroundTransparency = 1
+priEmpty.Text = "No priority added"; priEmpty.TextColor3 = UI_MUTED
+priEmpty.Font = Enum.Font.GothamMedium; priEmpty.TextSize = 7
+priEmpty.TextXAlignment = Enum.TextXAlignment.Left; priEmpty.Parent = chipStrip
+priCounter = Instance.new("TextLabel")
+priCounter.Size = UDim2.new(1,-16,0,12); priCounter.Position = UDim2.new(0,8,0,132)
+priCounter.BackgroundTransparency = 1; priCounter.Text = "0 brainrots"
+priCounter.TextColor3 = UI_MUTED; priCounter.Font = Enum.Font.GothamMedium
+priCounter.TextSize = 6.5; priCounter.TextXAlignment = Enum.TextXAlignment.Left
+priCounter.Parent = priCard
+priSaveBtn = CreateButton(priCard, "SAVE", UDim2.new(0.5,-6,0,22), UDim2.new(0,8,1,-30), true)
+priSaveBtn.TextColor3 = Color3.fromRGB(0,0,0)
+priClearBtn = CreateButton(priCard, "CLEAR", UDim2.new(0.5,-6,0,22), UDim2.new(0.5,-2,1,-30), false)
+function rebuildChips()
+    for _, c in ipairs(chipStrip:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+    priEmpty.Visible = (#PRIORITY == 0)
+    for i, word in ipairs(PRIORITY) do
+        local chip = Instance.new("TextButton")
+        chip.Size = UDim2.new(1,0,0,22); chip.BackgroundColor3 = UI_CARD_ALT
+        chip.BorderSizePixel = 0; chip.Text = tostring(word) .. "    x"
+        chip.TextSize = 8; chip.TextColor3 = UI_TEXT
+        chip.Font = Enum.Font.GothamBold; chip.TextXAlignment = Enum.TextXAlignment.Left
+        chip.LayoutOrder = i; chip.Parent = chipStrip
+        AddCorner(chip, 999); AddStroke(chip, UI_BORDER, 1)
+        chip.Activated:Connect(function()
+            for k,v in ipairs(PRIORITY) do if v == word then table.remove(PRIORITY,k) break end end
+            rebuildChips(); SavePriority(); ForceRescanPriorities()
+        end)
+    end
+end
+function addPriority(txt)
+    txt = tostring(txt or ""):gsub("^%s+",""):gsub("%s+$","")
+    if txt == "" then return end
+    local low = txt:lower()
+    for _, v in ipairs(PRIORITY) do if v == low then return end end
+    PRIORITY[#PRIORITY+1] = low
+    rebuildChips(); SavePriority(); ForceRescanPriorities()
+end
+priAddBtn.Activated:Connect(function() addPriority(priInput.Text) priInput.Text = "" end)
+priInput.FocusLost:Connect(function(e) if e then addPriority(priInput.Text) priInput.Text = "" end end)
+priSaveBtn.Activated:Connect(function()
+    local ok = SavePriority()
+    priSaveBtn.Text = ok and "SAVED" or "ERROR"
+    task.delay(0.8, function() if priSaveBtn and priSaveBtn.Parent then priSaveBtn.Text = "SAVE" end end)
+end)
+priClearBtn.Activated:Connect(function()
+    PRIORITY = {}
+    rebuildChips(); SavePriority(); ForceRescanPriorities()
+end)
+sugBox = Instance.new("Frame")
+sugBox.Size = UDim2.new(1,-16,0,0); sugBox.Position = UDim2.new(0,8,0,42)
+sugBox.BackgroundColor3 = UI_CARD; sugBox.BorderSizePixel = 0
+sugBox.Visible = false; sugBox.ZIndex = 100; sugBox.Parent = priCard
+AddCorner(sugBox, 10); AddStroke(sugBox, UI_ACCENT, 1)
+sugList = Instance.new("ScrollingFrame")
+sugList.Size = UDim2.new(1,-8,1,-8); sugList.Position = UDim2.new(0,4,0,4)
+sugList.BackgroundTransparency = 1; sugList.BorderSizePixel = 0
+sugList.ScrollBarThickness = 2; sugList.CanvasSize = UDim2.new(0,0,0,0)
+sugList.AutomaticCanvasSize = Enum.AutomaticSize.Y; sugList.ZIndex = 101
+sugList.Parent = sugBox
+do local sugLayout = Instance.new("UIListLayout") sugLayout.Padding = UDim.new(0,2) sugLayout.Parent = sugList end
+function showSuggestions(q)
+    for _, c in ipairs(sugList:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+    q = tostring(q or ""):lower():gsub("^%s+",""):gsub("%s+$","")
+    if q == "" then sugBox.Visible = false return end
+    local hits = {}
+    for _, d in ipairs(CatalogList) do
+        if d:lower():find(q,1,true) then hits[#hits+1] = d if #hits >= 5 then break end end
+    end
+    if #hits == 0 then sugBox.Visible = false return end
+    for i, d in ipairs(hits) do
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1,-4,0,22); b.BackgroundColor3 = UI_CARD_ALT
+        b.BorderSizePixel = 0; b.Text = d; b.TextColor3 = UI_TEXT
+        b.Font = Enum.Font.GothamMedium; b.TextSize = 8
+        b.TextXAlignment = Enum.TextXAlignment.Left; b.LayoutOrder = i
+        b.ZIndex = 102; b.Parent = sugList; AddCorner(b, 999)
+        b.Activated:Connect(function()
+            addPriority(d); priInput.Text = ""; sugBox.Visible = false
+        end)
+    end
+    sugBox.Visible = true
+    sugBox.Size = UDim2.new(1,-16,0,math.min(#hits,5)*24+8)
+end
+priInput:GetPropertyChangedSignal("Text"):Connect(function() showSuggestions(priInput.Text) end)
+
+plazaCard = CreateCard(__RADAR_UI.ConfigTab.scroll, 108)
+plazaStatus = Instance.new("TextLabel")
+plazaStatus.Size = UDim2.new(1,-16,0,16); plazaStatus.Position = UDim2.new(0,8,0,8)
+plazaStatus.BackgroundTransparency = 1; plazaStatus.Text = "Selected: " .. tostring(PlazaTier)
+plazaStatus.TextColor3 = UI_TEXT; plazaStatus.Font = Enum.Font.GothamBold
+plazaStatus.TextSize = 8; plazaStatus.TextXAlignment = Enum.TextXAlignment.Left
+plazaStatus.Parent = plazaCard
+plazaRow = Instance.new("Frame")
+plazaRow.Size = UDim2.new(1,-16,0,28); plazaRow.Position = UDim2.new(0,8,0,30)
+plazaRow.BackgroundTransparency = 1; plazaRow.Parent = plazaCard
+do local plazaLayout = Instance.new("UIListLayout") plazaLayout.FillDirection = Enum.FillDirection.Horizontal plazaLayout.Padding = UDim.new(0,4) plazaLayout.Parent = plazaRow end
+plazaTierButtons = {}
+for _, tier in ipairs({"Normal","Pro","OG"}) do
+    local b = CreateButton(plazaRow, tier, UDim2.new(1/3,-4,1,0), UDim2.new(), tier == PlazaTier)
+    plazaTierButtons[tier] = b
+    b.Activated:Connect(function()
+        PlazaTier = tier
+        for name, btn in pairs(plazaTierButtons) do
+            local selected = name == PlazaTier
+            btn.BackgroundColor3 = selected and UI_ACTIVE or UI_OFF
+            btn.TextColor3 = selected and Color3.fromRGB(0,0,0) or UI_TEXT
+        end
+        plazaStatus.Text = "Selected: " .. PlazaTier
+        SaveConfig()
+    end)
+end
+plazaHopButton = CreateButton(plazaCard, "HOP NOW", UDim2.new(1,-16,0,28), UDim2.new(0,8,1,-36), true)
+plazaHopButton.TextColor3 = Color3.fromRGB(0,0,0)
+plazaHopButton.Activated:Connect(function()
+    if PlazaTeleportBusy then return end
+    PlazaTeleportBusy = true
+    local placeId = PLAZA_PLACE_IDS[PlazaTier]
+    task.spawn(function()
+        local ok = pcall(function() TeleportService:Teleport(placeId, LocalPlayer) end)
+        if not ok then
+            plazaHopButton.Text = "ERROR"
+            task.delay(0.8, function() if plazaHopButton and plazaHopButton.Parent then plazaHopButton.Text = "HOP NOW" end end)
+        end
+        task.wait(2); PlazaTeleportBusy = false
+    end)
+end)
+
+-- ============================================================ --
+-- PRESETS
+-- ============================================================ --
+presetInputCard = CreateCard(__RADAR_UI.ConvincerTab.scroll, 70)
+presetInput = Instance.new("TextBox")
+presetInput.Size = UDim2.new(1,-16,0,32); presetInput.Position = UDim2.new(0,8,0,8)
+presetInput.BackgroundColor3 = UI_CARD_ALT; presetInput.BorderSizePixel = 0
+presetInput.Font = Enum.Font.Gotham; presetInput.PlaceholderText = "Type a message"
+presetInput.PlaceholderColor3 = UI_MUTED; presetInput.Text = ""
+presetInput.TextSize = 9; presetInput.TextColor3 = UI_TEXT
+presetInput.TextXAlignment = Enum.TextXAlignment.Left
+presetInput.ClearTextOnFocus = false; presetInput.Parent = presetInputCard
+AddCorner(presetInput,999); AddStroke(presetInput,UI_BORDER,1)
+presetAddBtn = CreateButton(presetInputCard,"ADD PRESET",UDim2.new(1,-16,0,22),UDim2.new(0,8,0,44),true)
+presetAddBtn.TextColor3 = Color3.fromRGB(0,0,0)
+presetListFrame = Instance.new("ScrollingFrame")
+presetListFrame.Size = UDim2.new(1,0,0,330); presetListFrame.BackgroundTransparency = 1
+presetListFrame.BorderSizePixel = 0; presetListFrame.ScrollBarThickness = 3
+presetListFrame.ScrollBarImageColor3 = UI_ACCENT_SOFT
+presetListFrame.CanvasSize = UDim2.new(0,0,0,0); presetListFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+presetListFrame.Parent = __RADAR_UI.ConvincerTab.scroll
+do local presetListLayout = Instance.new("UIListLayout") presetListLayout.Padding = UDim.new(0,6) presetListLayout.Parent = presetListFrame end
+function rebuildPresetList()
+    for _, child in ipairs(presetListFrame:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
+    end
+    if #Presets == 0 then
+        local empty = Instance.new("TextLabel")
+        empty.Size = UDim2.new(1,0,0,28); empty.BackgroundTransparency = 1
+        empty.Text = "No presets"; empty.TextColor3 = UI_MUTED
+        empty.Font = Enum.Font.GothamMedium; empty.TextSize = 8
+        empty.Parent = presetListFrame; return
+    end
+    for i, preset in ipairs(Presets) do
+        local card = Instance.new("Frame")
+        card.Size = UDim2.new(1,-4,0,72); card.BackgroundColor3 = UI_CARD
+        card.BorderSizePixel = 0; card.LayoutOrder = i; card.Parent = presetListFrame
+        AddCorner(card,10); AddStroke(card,UI_BORDER,1)
+        local tlbl = Instance.new("TextLabel")
+        tlbl.Size = UDim2.new(1,-16,0,30); tlbl.Position = UDim2.new(0,8,0,6)
+        tlbl.BackgroundTransparency = 1; tlbl.Text = tostring(preset.text)
+        tlbl.TextColor3 = UI_TEXT; tlbl.Font = Enum.Font.GothamMedium
+        tlbl.TextSize = 8; tlbl.TextWrapped = true
+        tlbl.TextXAlignment = Enum.TextXAlignment.Left
+        tlbl.TextYAlignment = Enum.TextYAlignment.Top
+        tlbl.TextTruncate = Enum.TextTruncate.AtEnd; tlbl.Parent = card
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1,-16,0,24); row.Position = UDim2.new(0,8,0,42)
+        row.BackgroundTransparency = 1; row.Parent = card
+        local lay = Instance.new("UIListLayout")
+        lay.FillDirection = Enum.FillDirection.Horizontal; lay.Padding = UDim.new(0,4); lay.Parent = row
+        local sendBtn = CreateButton(row,"SEND",UDim2.new(0,62,1,0),UDim2.new(),true)
+        sendBtn.TextColor3 = Color3.fromRGB(0,0,0)
+        sendBtn.Activated:Connect(function()
+            if sendBtn:GetAttribute("Busy") then return end
+            sendBtn:SetAttribute("Busy", true)
+            local success = sendTradeChatInstant(preset.text)
+            sendBtn.Text = success and "SENT" or "FAIL"
+            task.delay(0.55,function() if sendBtn and sendBtn.Parent then sendBtn.Text = "SEND" sendBtn:SetAttribute("Busy", false) end end)
+        end)
+        local copyBtn = CreateButton(row,"COPY",UDim2.new(0,62,1,0),UDim2.new(),false)
+        copyBtn.Activated:Connect(function()
+            pcall(function() if setclipboard then setclipboard(preset.text) end end)
+            copyBtn.Text = "COPIED"
+            task.delay(0.55,function() if copyBtn and copyBtn.Parent then copyBtn.Text = "COPY" end end)
+        end)
+        local editBtn = CreateButton(row,"EDIT",UDim2.new(0,62,1,0),UDim2.new(),false)
+        editBtn.Activated:Connect(function()
+            presetInput.Text = preset.text; table.remove(Presets,i)
+            rebuildPresetList(); SaveConfig(); presetInput:CaptureFocus()
+        end)
+        local delBtn = CreateButton(row,"DEL",UDim2.new(0,50,1,0),UDim2.new(),false)
+        delBtn.Activated:Connect(function() table.remove(Presets,i) rebuildPresetList(); SaveConfig() end)
+    end
+end
+presetAddBtn.Activated:Connect(function()
+    local txt = tostring(presetInput.Text or ""):gsub("^%s+",""):gsub("%s+$","")
+    if txt == "" then return end
+    Presets[#Presets+1] = {text = txt}
+    presetInput.Text = ""; rebuildPresetList(); SaveConfig()
+end)
+presetInput.FocusLost:Connect(function(e) if e then presetAddBtn:Activate() end end)
+
+rebuildChips()
+rebuildPresetList()
+UpdateDragonList()
+ActivateTab(__RADAR_UI.ListTab)
+
+MinBtn.Activated:Connect(function()
+    local minimized = not (Win.Size.Y.Offset == __RADAR_UI.HDR_H + 16)
+    __RADAR_UI.ContentArea.Visible = not minimized
+    __RADAR_UI.TabBar.Visible = not minimized
+    MinBtn.Text = minimized and "+" or "-"
+    Win.Size = minimized and UDim2.new(0,__RADAR_UI.WIN_W,0,__RADAR_UI.HDR_H+16) or UDim2.new(0,__RADAR_UI.WIN_W,0,__RADAR_UI.WIN_H)
+end)
+
+task.spawn(function()
+    local last = -1
+    while __RADAR_UI.Screen and __RADAR_UI.Screen.Parent do
+        local n = #CatalogList
+        if n ~= last then
+            last = n
+            priCounter.Text = n .. " brainrots"
+            priInput.PlaceholderText = n > 0 and ("Search " .. n .. " brainrots") or "Search brainrot"
+        end
+        task.wait(2)
+    end
+end)
+
+-- ============================================================ --
+-- TRADE OVERLAY
+-- ============================================================ --
+tradeOverlay = Instance.new("ScreenGui")
+tradeOverlay.Name = "ConvincerTradeOverlay"
+tradeOverlay.ResetOnSpawn = false
+tradeOverlay.IgnoreGuiInset = true
+tradeOverlay.DisplayOrder = 1500
+tradeOverlay.Parent = PlayerGui
+
+tradeCard = Instance.new("Frame")
+tradeCard.Size = UDim2.new(0, 320, 0, 62); tradeCard.Position = UDim2.new(0, -400, 0, -400)
+tradeCard.BackgroundColor3 = Color3.fromRGB(10, 14, 20)
+tradeCard.BackgroundTransparency = 0.08; tradeCard.BorderSizePixel = 0
+tradeCard.Visible = false; tradeCard.Parent = tradeOverlay
+AddCorner(tradeCard, 14)
+tradeCardStroke = AddStroke(tradeCard, UI_ACCENT, 2)
+
+task.spawn(function()
+    while tradeOverlay and tradeOverlay.Parent do
+        if tradeCard and tradeCard.Visible then
+            local t = tick()
+            tradeCardStroke.Transparency = 0.1 + math.abs(math.sin(t * 2)) * 0.4
+        end
+        RunService.RenderStepped:Wait()
+    end
+end)
+
+tradePfp = Instance.new("ImageLabel")
+tradePfp.Size = UDim2.new(0, 42, 0, 42); tradePfp.Position = UDim2.new(0, 10, 0, 10)
+tradePfp.BackgroundColor3 = UI_CARD; tradePfp.BorderSizePixel = 0
+tradePfp.Parent = tradeCard; AddCorner(tradePfp, 999)
+AddStroke(tradePfp, UI_ACCENT, 1.5)
+
+tradeName = Instance.new("TextLabel")
+tradeName.Size = UDim2.new(0, 130, 0, 16); tradeName.Position = UDim2.new(0, 60, 0, 12)
+tradeName.BackgroundTransparency = 1; tradeName.Text = ""
+tradeName.TextColor3 = Color3.fromRGB(255, 255, 255)
+tradeName.Font = Enum.Font.GothamBold; tradeName.TextSize = 11
+tradeName.TextXAlignment = Enum.TextXAlignment.Left
+tradeName.TextTruncate = Enum.TextTruncate.AtEnd; tradeName.Parent = tradeCard
+
+tradeSub = Instance.new("TextLabel")
+tradeSub.Size = UDim2.new(0, 130, 0, 12); tradeSub.Position = UDim2.new(0, 60, 0, 32)
+tradeSub.BackgroundTransparency = 1; tradeSub.Text = "trading with you"
+tradeSub.TextColor3 = UI_MUTED; tradeSub.Font = Enum.Font.Gotham
+tradeSub.TextSize = 8; tradeSub.TextXAlignment = Enum.TextXAlignment.Left
+tradeSub.Parent = tradeCard
+
+tradeAddBtn = Instance.new("TextButton")
+tradeAddBtn.Size = UDim2.new(0, 56, 0, 32); tradeAddBtn.Position = UDim2.new(1, -244, 0, 15)
+tradeAddBtn.BackgroundColor3 = UI_ACCENT; tradeAddBtn.BorderSizePixel = 0
+tradeAddBtn.Text = "+ ADD"; tradeAddBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+tradeAddBtn.Font = Enum.Font.GothamBold; tradeAddBtn.TextSize = 9
+tradeAddBtn.AutoButtonColor = false; tradeAddBtn.Parent = tradeCard
+AddCorner(tradeAddBtn, 999)
+
+tradeTPBtn = Instance.new("TextButton")
+tradeTPBtn.Size = UDim2.new(0, 56, 0, 32); tradeTPBtn.Position = UDim2.new(1, -182, 0, 15)
+tradeTPBtn.BackgroundColor3 = UI_ACCENT; tradeTPBtn.BorderSizePixel = 0
+tradeTPBtn.Text = "TP"; tradeTPBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+tradeTPBtn.Font = Enum.Font.GothamBold; tradeTPBtn.TextSize = 9
+tradeTPBtn.AutoButtonColor = false; tradeTPBtn.Parent = tradeCard
+AddCorner(tradeTPBtn, 999)
+
+tradeStopBtn = Instance.new("TextButton")
+tradeStopBtn.Size = UDim2.new(0, 56, 0, 32); tradeStopBtn.Position = UDim2.new(1, -120, 0, 15)
+tradeStopBtn.BackgroundColor3 = UI_OFF; tradeStopBtn.BorderSizePixel = 0
+tradeStopBtn.Text = "STOP"; tradeStopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+tradeStopBtn.Font = Enum.Font.GothamBold; tradeStopBtn.TextSize = 9
+tradeStopBtn.AutoButtonColor = false; tradeStopBtn.Parent = tradeCard
+AddCorner(tradeStopBtn, 999); AddStroke(tradeStopBtn, UI_ACCENT, 1)
+
+tradeLangBtn = Instance.new("TextButton")
+tradeLangBtn.Size = UDim2.new(0, 56, 0, 32); tradeLangBtn.Position = UDim2.new(1, -58, 0, 15)
+tradeLangBtn.BackgroundColor3 = UI_OFF; tradeLangBtn.BorderSizePixel = 0
+tradeLangBtn.Text = AutoSendLang:upper(); tradeLangBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+tradeLangBtn.Font = Enum.Font.GothamBold; tradeLangBtn.TextSize = 9
+tradeLangBtn.AutoButtonColor = false; tradeLangBtn.Parent = tradeCard
+AddCorner(tradeLangBtn, 999); AddStroke(tradeLangBtn, UI_ACCENT, 1)
+
+tradeLangBtn.MouseButton1Click:Connect(function()
+    local order = {"pt","es","en"}
+    local cur = 1
+    for i, v in ipairs(order) do if v == AutoSendLang then cur = i break end end
+    AutoSendLang = order[(cur % #order) + 1]
+    tradeLangBtn.Text = AutoSendLang:upper()
+    SaveConfig()
+end)
+
+function playerNamed(nm)
+    if not nm then return nil end
+    local p = Players:FindFirstChild(nm)
+    if p then return p end
+    for _, q in ipairs(Players:GetPlayers()) do
+        if q.Name:lower() == nm:lower() or q.DisplayName:lower() == nm:lower() then return q end
+    end
+    return nil
+end
+tradeAddBtn.MouseButton1Click:Connect(function()
+    local nm = currentPartner
+    if not nm then return end
+    local plr = playerNamed(nm)
+    if plr then
+        SendFriendRequest(plr)
+        tradeAddBtn.Text = "SENT"
+        task.delay(2, function() if tradeAddBtn and tradeAddBtn.Parent then tradeAddBtn.Text = "+ ADD" end end)
+    end
+end)
+tradeTPBtn.MouseButton1Click:Connect(function()
+    local nm = currentPartner
+    if not nm then return end
+    local plr = playerNamed(nm)
+    if plr then
+        tradeTPBtn.Text = "..."
+        task.spawn(function()
+            local ok, why = RawTeleportToBase(plr)
+            if tradeTPBtn and tradeTPBtn.Parent then tradeTPBtn.Text = ok and "OK" or "ERR" end
+            task.delay(1, function() if tradeTPBtn and tradeTPBtn.Parent then tradeTPBtn.Text = "TP" end end)
+            if not ok then warn("[TP OVERLAY] " .. tostring(why) .. " -> " .. plr.Name) end
+        end)
+    end
+end)
+tradeStopBtn.MouseButton1Click:Connect(function()
+    StopAutoSend()
+end)
+
+-- ============================================================ --
+-- TRADE LOOP MAIN
+-- ============================================================ --
+tradeUIRoot = nil
+function UpdateTradeOverlay()
+    local nm = findTradePartnerLabel()
+    if nm then
+        local vp = playerNamed(nm)
+        if not vp or vp == LocalPlayer or vp.UserId == LocalPlayer.UserId then nm = nil end
+    end
+    if nm then
+        tradeClosedAt = nil
+        if nm ~= currentPartner then
+            currentPartner = nm
+            tradeName.Text = "@" .. nm
+            local plr = playerNamed(nm)
+            currentPartnerId = (plr and plr ~= LocalPlayer) and plr.UserId or nil
+            if currentPartnerId then
+                tradePfp.Image = "rbxthumb://type=AvatarHeadShot&id=" .. currentPartnerId .. "&w=150&h=150"
+            else
+                tradePfp.Image = ""
+                task.spawn(function()
+                    local ok, id = pcall(function() return Players:GetUserIdFromNameAsync(nm) end)
+                    if ok and type(id) == "number" and currentPartner == nm then
+                        currentPartnerId = id
+                        tradePfp.Image = "rbxthumb://type=AvatarHeadShot&id=" .. id .. "&w=150&h=150"
+                    end
+                end)
+            end
+            tradeUIRoot = nil
+        end
+        if AutoSendEnabled and currentPartnerId and not AutoSendRunning and AutoSendHandledPartner ~= currentPartnerId then
+            AutoSendHandledPartner = currentPartnerId
+            RunAutoSendSequence(currentPartnerId)
+        end
+        if not tradeUIRoot or not tradeUIRoot.Parent then
+            local root = LocalPlayer:FindFirstChild("PlayerGui")
+            if root then
+                local best, bestArea = nil, 0
+                for _, o in ipairs(root:GetDescendants()) do
+                    if o:IsA("TextLabel") and o.Visible then
+                        local t = tostring(o.Text)
+                        local t2 = t:match("@([%w_]+)'s")
+                        if t2 and t:lower():find("offer", 1, true) then
+                            local cur = o
+                            while cur and cur.Parent do
+                                if cur:IsA("GuiObject") and cur.Visible then
+                                    local a = cur.AbsoluteSize.X * cur.AbsoluteSize.Y
+                                    if a > bestArea then best, bestArea = cur, a end
+                                end
+                                if cur:IsA("ScreenGui") then break end
+                                cur = cur.Parent
+                            end
+                            break
+                        end
+                    end
+                end
+                if best then tradeUIRoot = best end
+            end
+        end
+        if tradeUIRoot and tradeUIRoot.Parent then
+            local p, sz = tradeUIRoot.AbsolutePosition, tradeUIRoot.AbsoluteSize
+            tradeCard.Position = UDim2.fromOffset(math.floor(p.X + sz.X * 0.5 - 160), math.floor(p.Y + 8))
+        end
+        if not tradeCard.Visible then tradeCard.Visible = true end
+    else
+        if tradeCard.Visible then tradeCard.Visible = false end
+        if not tradeClosedAt then tradeClosedAt = tick() end
+        if tradeClosedAt and tick() - tradeClosedAt > 2 then
+            currentPartner = nil
+            currentPartnerId = nil
+            AutoSendHandledPartner = nil
+            AutoSendRunning = false
+            tradeUIRoot = nil
+            tradeClosedAt = nil
+        end
+    end
+end
+
+task.spawn(function()
+    while __RADAR_UI.Screen and __RADAR_UI.Screen.Parent do
+        pcall(UpdateTradeOverlay)
+        task.wait(0.5)
+    end
+end)
+
+task.spawn(function()
+    while __RADAR_UI.Screen and __RADAR_UI.Screen.Parent do
+        pcall(DetectPriorityTradeRequest)
+        task.wait(2)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    dragonOwners[player.UserId] = nil
+    dragonItems[player.UserId] = nil
+    playerBases[player.UserId] = nil
+    clearPriorityTag(player)
+    QueueDragonListUpdate()
+end)
+
+-- ============================================================ --
+-- INIT
+-- ============================================================ --
+if fpsOptimizerEnabled then ApplyFPSOptimizer() end
+ForceRescanPriorities()
+UpdateDragonList()
+
+print("[CONVINCER] v21 | Catálogo: " .. #CatalogList .. " | AutoSend: " .. tostring(AutoSendEnabled) .. " (" .. AutoSendLang .. ")")
+print("[CONVINCER] Trade Remote: " .. (REMOTES.trade and REMOTES.trade:GetFullName() or "aguardando..."))
